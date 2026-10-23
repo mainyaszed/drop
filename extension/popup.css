@@ -568,3 +568,18 @@ body.editing { min-height: 470px; }
 .update-bar .icon-btn { font-size: 15px; }
 .upd-line { margin: 4px 0 0; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
 #updateBar { flex-shrink: 0; }
+.auto-upd { margin-top: 10px; }
+.update-bar.ok span { color: var(--ok); }
+#settings { flex: 1 1 auto; min-height: 0; overflow-y: auto; } /* never taller than the 600 px popup */
+.auto-upd { margin-top: 2px; }
+
+/* --------------------------------------------------------------- what's new -- */
+.wn-panel { display: flex; flex-direction: column; max-height: calc(100vh - 32px); }
+.wn-list { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 14px; padding-right: 2px; }
+.wn-item img {
+  display: block; width: 100%; max-height: 180px; object-fit: cover; object-position: top;
+  border-radius: 10px; box-shadow: 0 8px 18px -10px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(255, 255, 255, 0.1);
+}
+.wn-item h3 { margin: 9px 0 2px; font-size: 13.5px; color: var(--text-strong); }
+.wn-item p { margin: 0; font-size: 12px; line-height: 1.45; color: var(--muted); }
+.wn-ok { flex: none; width: 100%; margin-top: 12px; padding: 9px; }

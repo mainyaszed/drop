@@ -1,0 +1,21 @@
+{
+  "1.1.0": {
+    "items": [
+      {
+        "title": "Updates install themselves",
+        "text": "When a new version of Drop is out, it installs on its own. A small window shows the progress, then closes, and Drop restarts on the new version. If you're downloading something, it waits until you're done.",
+        "image": "whatsnew/1.1.0-auto-update.jpg"
+      },
+      {
+        "title": "You'll know when it's done",
+        "text": "After an update, Drop tells you it's up to date and opens this screen with what changed. You can open it again any time from Settings > What's new.",
+        "image": "whatsnew/1.1.0-updated.jpg"
+      },
+      {
+        "title": "Your choice",
+        "text": "Prefer to update yourself? Turn off \"Install updates automatically\" in Settings. Drop will just let you know when there's a new version, and Check for updates looks right away.",
+        "image": "whatsnew/1.1.0-settings.jpg"
+      }
+    ]
+  }
+}

@@ -8,7 +8,7 @@ const FORMAT_HINTS = {
   flac: "Lossless copy of the source. Big files, same quality.",
 };
 
-const DEFAULT_SETTINGS = { outDir: "", format: "best", pattern: "{artist} - {title}", vlc: "", bg: "wallpaper" };
+const DEFAULT_SETTINGS = { outDir: "", format: "best", pattern: "{artist} - {title}", vlc: "", bg: "wallpaper", autoUpdate: true };
 
 const BG_HINTS = {
   wallpaper: "Your Windows desktop wallpaper. Follows it when you change it.",
@@ -1153,6 +1153,7 @@ async function loadSettings() {
   setDefaultFormat(state.settings.format);
   $("#setPattern").value = state.settings.pattern;
   $("#setVlc").value = state.settings.vlc;
+  $("#setAutoUpd").checked = state.settings.autoUpdate !== false;
   renderBgSeg();
 }
 
@@ -1317,6 +1318,7 @@ async function saveSettings() {
     pattern: $("#setPattern").value.trim() || DEFAULT_SETTINGS.pattern,
     vlc: $("#setVlc").value.trim(),
     bg: state.settings.bg || "wallpaper",
+    autoUpdate: $("#setAutoUpd").checked,
   };
   await chrome.storage.sync.set({ settings: state.settings });
   if (state.info && !state.filenameEdited) $("#fFilename").value = filenameFromPattern();
@@ -1350,18 +1352,40 @@ async function checkHelper() {
 
 // ----------------------------------------------------------------- updates --
 
+function updateNote(text, { ok = false, button = false } = {}) {
+  const bar = $("#updateBar");
+  $("#updateText").textContent = text;
+  bar.classList.toggle("ok", ok);
+  show("#updateBtn", button);
+  bar.hidden = false;
+}
+
 async function showUpdateState() {
   const bar = $("#updateBar");
-  const { updating, updDismissed } = await chrome.storage.local.get(["updating", "updDismissed"]);
-  if (updating) {
-    $("#updateText").textContent = `Installing Drop ${updating.version}… finish the setup window; Drop restarts by itself.`;
-    show("#updateBtn", false);
-    bar.hidden = false;
+  const { justUpdated } = await chrome.storage.local.get("justUpdated");
+  if (justUpdated) { // shown once, right after Drop reloaded into a new version
+    updateNote(`Updated to Drop ${justUpdated.to} ✓`, { ok: true });
+    $("#updateLater").onclick = () => { bar.hidden = true; };
+    await chrome.storage.local.remove("justUpdated");
+    openWhatsNew(justUpdated.to);
     return;
   }
   let r;
-  try { r = await bg("checkUpdate"); } catch { return; }
+  try { r = await bg("checkUpdate"); } catch { return; } // also starts an automatic update
+  const { updating, updateWaiting, updDismissed } = await chrome.storage.local.get(["updating", "updateWaiting", "updDismissed"]);
+  $("#updateLater").onclick = () => { bar.hidden = true; };
+  if (updating) {
+    updateNote(updating.silent
+      ? `Updating to Drop ${updating.version}… the update window shows the progress; Drop restarts by itself.`
+      : `Installing Drop ${updating.version}… finish the setup window; Drop restarts by itself.`);
+    return;
+  }
+  if (updateWaiting) {
+    updateNote(`Drop ${updateWaiting} will install when your downloads finish.`);
+    return;
+  }
   if (!r?.newer || r.latest === updDismissed) return;
+  // only reached when automatic updates are switched off
   $("#updateText").textContent = `Drop ${r.latest} is available.`;
   bar.title = r.notes ? `What's new:\n${r.notes}` : "";
   show("#updateBtn");
@@ -1384,6 +1408,42 @@ async function showUpdateState() {
   };
 }
 
+// What changed in a version: extension/whatsnew.json ({"1.1.0": {"items": [{title, text, image}]}}),
+// pictures in extension/whatsnew/. Opens by itself once after an update.
+async function openWhatsNew(version) {
+  let notes = {};
+  try { notes = await (await fetch("whatsnew.json")).json(); } catch {}
+  const versions = Object.keys(notes);
+  const v = notes[version] ? version : notes[chrome.runtime.getManifest().version] ? chrome.runtime.getManifest().version : versions[0];
+  if (!v) return;
+  $("#wnTitle").textContent = `What's new in Drop ${v}`;
+  $("#wnList").replaceChildren(...notes[v].items.map((it) => {
+    const card = document.createElement("article");
+    card.className = "wn-item";
+    if (it.image) {
+      const img = document.createElement("img");
+      img.src = it.image;
+      img.alt = "";
+      img.onerror = () => img.remove();
+      card.append(img);
+    }
+    const h = document.createElement("h3");
+    h.textContent = it.title;
+    const p = document.createElement("p");
+    p.textContent = it.text;
+    card.append(h, p);
+    return card;
+  }));
+  $("#wnList").scrollTop = 0;
+  show("#whatsNew");
+  document.body.classList.add("editing"); // room for the dialog
+}
+
+function closeWhatsNew() {
+  show("#whatsNew", false);
+  if ($("#editor").hidden) document.body.classList.remove("editing");
+}
+
 async function checkUpdatesNow() {
   const b = $("#checkUpdBtn");
   b.disabled = true;
@@ -1391,7 +1451,7 @@ async function checkUpdatesNow() {
   try {
     const r = await bg("checkUpdate", { force: true });
     b.textContent = r.error ? "Couldn't check" : r.newer ? `Drop ${r.latest} is available` : "You're up to date";
-    if (r.newer) { await chrome.storage.local.remove("updDismissed"); showUpdateState(); }
+    if (r.newer) { await chrome.storage.local.remove("updDismissed"); setTimeout(showUpdateState, 300); }
   } catch {
     b.textContent = "Couldn't check";
   }
@@ -1501,6 +1561,11 @@ async function init() {
   };
   $("#folderBtn").onclick = pickFolder;
   $("#checkUpdBtn").onclick = checkUpdatesNow;
+  $("#whatsNewBtn").onclick = () => openWhatsNew();
+  $("#wnOk").onclick = closeWhatsNew;
+  $("#wnClose").onclick = closeWhatsNew;
+  $("#whatsNew").onclick = (e) => { if (e.target.id === "whatsNew") closeWhatsNew(); };
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("#whatsNew").hidden) closeWhatsNew(); });
   $("#versionInfo").textContent = `Drop v${chrome.runtime.getManifest().version}`;
   $$("#setBgSeg .seg").forEach((b) => (b.onclick = () => chooseBg(b.dataset.bg)));
   $("#bgFile").onchange = onBgFile;

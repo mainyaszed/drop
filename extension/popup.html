@@ -77,13 +77,18 @@
       <small>On your phone: VLC › Network › Sharing via Wi-Fi. Type the address it shows.</small>
     </label>
     <p id="vlcStatus" class="small muted vlc-status"></p>
+    <div class="setting">
+      <span class="setting-label">Updates</span>
+      <label class="check auto-upd"><input type="checkbox" id="setAutoUpd" checked /> Install updates automatically</label>
+      <p class="small upd-line"><span id="versionInfo" class="muted"></span>
+        <button type="button" id="checkUpdBtn" class="link">Check for updates</button>
+        <button type="button" id="whatsNewBtn" class="link">What's new</button></p>
+    </div>
     <div class="row">
       <button id="updateBtn" class="secondary">Update yt-dlp</button>
       <button id="settingsDone" class="primary">Done</button>
     </div>
     <p id="helperInfo" class="muted small"></p>
-    <p class="small upd-line"><span id="versionInfo" class="muted"></span>
-      <button type="button" id="checkUpdBtn" class="link">Check for updates</button></p>
   </section>
 
   <main id="main">
@@ -252,6 +257,18 @@
         <button type="button" id="edCancel" class="secondary">Cancel</button>
         <button type="button" id="edApply" class="primary">Apply</button>
       </div>
+    </div>
+  </div>
+
+  <!-- what changed in this version: extension/whatsnew.json + pictures in extension/whatsnew/ -->
+  <div id="whatsNew" class="editor" hidden>
+    <div class="editor-panel glass dense wn-panel" role="dialog" aria-label="What's new">
+      <div class="editor-head">
+        <h2 id="wnTitle">What's new</h2>
+        <button type="button" id="wnClose" class="icon-btn" aria-label="Close">×</button>
+      </div>
+      <div id="wnList" class="wn-list"></div>
+      <button type="button" id="wnOk" class="primary big wn-ok">Got it</button>
     </div>
   </div>
 

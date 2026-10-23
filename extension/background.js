@@ -151,6 +151,36 @@ async function checkForUpdate(force = false) {
   }
 }
 
+// Automatic updates: install in the background with no window, but never in the
+// middle of a download. Off switch: Settings > "Install updates automatically".
+async function autoUpdate(upd) {
+  if (!upd?.newer || !upd.url) return;
+  const { settings = {} } = await chrome.storage.sync.get("settings");
+  if (settings.autoUpdate === false) return;
+  const { updating } = await chrome.storage.local.get("updating");
+  if (updating) return;
+  const running = Object.values(await getJobs()).some((j) => j.status === "running");
+  if (running) {
+    await chrome.storage.local.set({ updateWaiting: upd.latest });
+    chrome.alarms.create("update-retry", { delayInMinutes: 2 }); // try again when downloads are done
+    return;
+  }
+  await chrome.storage.local.remove("updateWaiting");
+  await startUpdate(upd.url, upd.latest, true);
+}
+
+async function startUpdate(url, version, silent) {
+  await chrome.storage.local.set({ updating: { version, silent, since: Date.now() } });
+  chrome.alarms.create("update-watch", { delayInMinutes: 0.5, periodInMinutes: 0.5 });
+  try {
+    return await call("install_update", { url, version, silent });
+  } catch (e) {
+    await chrome.storage.local.remove("updating");
+    chrome.alarms.clear("update-watch");
+    throw e;
+  }
+}
+
 async function watchInstalledVersion() {
   const { updating } = await chrome.storage.local.get("updating");
   if (!updating || Date.now() - updating.since > 30 * 60 * 1000) {
@@ -170,7 +200,8 @@ async function watchInstalledVersion() {
 }
 
 chrome.alarms.onAlarm.addListener((a) => {
-  if (a.name === "update-check") checkForUpdate(true);
+  if (a.name === "update-check") checkForUpdate(true).then(autoUpdate);
+  if (a.name === "update-retry") checkForUpdate().then(autoUpdate);
   if (a.name === "update-watch") watchInstalledVersion();
 });
 chrome.runtime.onStartup.addListener(() => chrome.alarms.create("update-check", { delayInMinutes: 1, periodInMinutes: 360 }));
@@ -197,14 +228,13 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         return call("reveal", { path: msg.path });
       case "update":
         return call("update");
-      case "checkUpdate":
-        return checkForUpdate(!!msg.force);
-      case "installUpdate": {
-        const r = await call("install_update", { url: msg.url, version: msg.version });
-        await chrome.storage.local.set({ updating: { version: msg.version, since: Date.now() } });
-        chrome.alarms.create("update-watch", { delayInMinutes: 0.5, periodInMinutes: 0.5 });
-        return r;
+      case "checkUpdate": {
+        const upd = await checkForUpdate(!!msg.force);
+        autoUpdate(upd); // no-op when off, already updating or nothing new
+        return upd;
       }
+      case "installUpdate": // manual (auto-update switched off): open the setup window
+        return startUpdate(msg.url, msg.version, false);
       case "scTracks":
         return call("sc_tracks", { ids: msg.ids, urls: msg.urls });
       case "wallpaper":
@@ -258,7 +288,10 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
 // Right-click menu: MV3 can't open the toolbar popup programmatically, so open
 // the same popup UI in a small window with the link passed as ?url=.
-chrome.runtime.onInstalled.addListener(() => {
+chrome.runtime.onInstalled.addListener((d) => {
+  if (d.reason === "update" && d.previousVersion && d.previousVersion !== CURRENT) {
+    chrome.storage.local.set({ justUpdated: { from: d.previousVersion, to: CURRENT } });
+  }
   chrome.alarms.create("update-check", { delayInMinutes: 1, periodInMinutes: 360 });
   chrome.contextMenus.create({
     id: "snag-link",

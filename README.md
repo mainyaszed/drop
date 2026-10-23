@@ -72,19 +72,29 @@ The orange cone button next to Download lights up only while VLC's sharing scree
 
 ## Updates
 
-Drop checks this repo's [releases](https://github.com/mainyaszed/drop/releases) about every 6 hours (⚙ › **Check for updates** checks right away). When a newer version is out, the popup shows **Drop x.y.z is available · Update**: click it, follow the setup window, and Drop restarts itself with the new version. Updates are only downloaded from this repo's releases.
+Drop updates itself. About every 6 hours it checks this repo's [releases](https://github.com/mainyaszed/drop/releases); when a newer version is out it installs it on its own:
+
+| | |
+|---|---|
+| <img src="docs/updates/1-updating-note.png" width="300"> | The popup says it's updating (if you're mid-download, it waits until you're done). |
+| <img src="docs/updates/2-update-window.png" width="300"> | A small window shows the progress. Nothing to click. |
+| <img src="docs/updates/3-update-window-done.png" width="300"> | It closes by itself and Drop restarts on the new version. |
+| <img src="docs/updates/5-whats-new.png" width="220"> | **What's new** opens once, with pictures of what changed (also in ⚙ › What's new). |
+
+Don't want that? ⚙ › turn off **Install updates automatically**: Drop then just shows an **Update** button when there's a new version. Updates are only ever downloaded from this repo's releases.
 
 ## Making a release
 
 1. Bump `"version"` in `extension/manifest.json`.
-2. Build the installer: `powershell -ExecutionPolicy Bypass -File build-setup.ps1` → `dist\Drop-Setup.exe`.
-3. Publish it: `gh release create v1.1.0 dist\Drop-Setup.exe --title "Drop 1.1.0" --notes "What changed"`.
+2. Describe what changed in `extension/whatsnew.json` (title, text and a picture in `extension/whatsnew/` per item). That's what users see in **What's new** after updating.
+3. Build the installer: `powershell -ExecutionPolicy Bypass -File build-setup.ps1` → `dist\Drop-Setup.exe`.
+4. Publish it: `gh release create v1.2.0 dist\Drop-Setup.exe --title "Drop 1.2.0" --notes "What changed"`.
 
 ## Project layout
 
 | Path | What it is |
 |---|---|
-| `extension/` | The Chrome/Edge extension (popup, background worker, icons) |
+| `extension/` | The Chrome/Edge extension (popup, background worker, icons, `whatsnew.json`) |
 | `host/snagtune_host.py` | The local helper (yt-dlp, ffmpeg, tagging, VLC upload, updates) |
 | `setup-gui.ps1` | The setup window packed into `Drop-Setup.exe` |
 | `build-setup.ps1` | Builds `dist/Drop-Setup.exe` |

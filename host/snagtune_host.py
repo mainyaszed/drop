@@ -968,12 +968,36 @@ def cmd_install_update(msg):
     url = msg.get("url") or ""
     if not url.startswith(f"https://github.com/{GITHUB_REPO}/releases/download/"):
         raise RuntimeError("That update doesn't come from Drop's GitHub releases.")
-    dest = Path(tempfile.gettempdir()) / f"Drop-Setup-{safe_filename(msg.get('version') or 'latest')}.exe"
+    version = safe_filename(msg.get("version") or "latest")
+    dest = Path(tempfile.gettempdir()) / f"Drop-Setup-{version}.exe"
     req = urllib.request.Request(url, headers={"User-Agent": "Drop-updater"})
     with urllib.request.urlopen(req, timeout=60) as r, open(dest, "wb") as f:
         shutil.copyfileobj(r, f, 256 * 1024)
-    # Start it through Explorer so it runs outside this helper's process tree:
-    # setup stops the running helper (us) while it updates.
+
+    if msg.get("silent"):
+        # Unpack the installer and run it in update mode. Setup stops this
+        # helper while it updates, so the setup process must not be our child in
+        # Chrome's eyes: start it detached and outside our job if Windows allows.
+        unpack = Path(tempfile.gettempdir()) / f"drop-update-{version}"
+        shutil.rmtree(unpack, ignore_errors=True)
+        unpack.mkdir(parents=True)
+        subprocess.run([str(dest), "/C", f"/T:{unpack}", "/Q"], check=True, timeout=120,
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        # the setup window in update mode: shows the progress, needs no clicks, closes itself
+        cmd = ["powershell.exe", "-NoProfile", "-STA", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden",
+               "-File", str(unpack / "setup-gui.ps1"), "-Update", "-Version", version]
+        log_file = open(HERE / "update.log", "w", encoding="utf-8")
+        # a hidden console, not DETACHED_PROCESS: PowerShell quietly does nothing without one
+        base = 0x00000200 | 0x08000000  # CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
+        kw = dict(cwd=str(unpack), stdin=subprocess.DEVNULL, stdout=log_file, stderr=subprocess.STDOUT)
+        try:
+            subprocess.Popen(cmd, creationflags=base | 0x01000000, **kw)  # + CREATE_BREAKAWAY_FROM_JOB
+        except OSError:
+            subprocess.Popen(cmd, creationflags=base, **kw)
+        return {"started": True, "silent": True}
+
+    # Interactive: open the setup window through Explorer (outside this helper's
+    # process tree, since setup stops the running helper while it updates).
     subprocess.Popen(["explorer.exe", str(dest)])
     return {"started": True, "path": str(dest)}
 

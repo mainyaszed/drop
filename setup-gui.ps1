@@ -5,8 +5,12 @@
 #   -InstallDir    where to install (default %LOCALAPPDATA%\SnagTune, the app's original folder name)
 #   -NoRegister    skip the browser registry entries (testing)
 #   -Snapshot png  render the window with sample progress to an image and exit (design check)
+#   -Update        automatic update started by Drop: same window, no questions, closes itself when done
+#   -Version x.y.z the version being installed (shown in update mode)
 param(
     [switch]$Headless,
+    [switch]$Update,
+    [string]$Version,
     [string]$InstallDir = (Join-Path $env:LOCALAPPDATA "SnagTune"),
     [switch]$NoRegister,
     [string]$Snapshot
@@ -351,6 +355,16 @@ function Finish {
         $el.NextText.Foreground = & $brush "#991B1B"
         $el.NextBox.Visibility = "Visible"
         $el.CloseBtn.Content = "Close"
+    } elseif ($Update) {
+        # automatic update: nothing left for the user to do, so close by itself
+        $el.Bar.Value = 100
+        $el.Status.Text = "Done, closing..."
+        $el.Sub.Text = "Drop is up to date$(if ($Version) { " ($Version)" }). It restarts by itself in a moment."
+        $el.CloseBtn.Content = "Close"
+        $closer = New-Object Windows.Threading.DispatcherTimer
+        $closer.Interval = [TimeSpan]::FromSeconds(4)
+        $closer.Add_Tick({ $closer.Stop(); $win.Close() })
+        $closer.Start()
     } else {
         $el.Bar.Value = 100
         $el.Status.Text = "All set"
@@ -367,6 +381,11 @@ function Finish {
 }
 
 $el.OpenBtn.Add_Click({ Open-Extensions })
+
+if ($Update) {
+    $win.Title = "Updating Drop"
+    $el.Sub.Text = "Updating to Drop $Version. You don't need to do anything; Drop restarts by itself when it's done."
+}
 
 # design check: sample progress, render to PNG, exit
 if ($Snapshot) {
