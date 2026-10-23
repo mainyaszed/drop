@@ -1,4 +1,13 @@
 {
+  "1.1.1": {
+    "items": [
+      {
+        "title": "Cleaner Settings",
+        "text": "Settings no longer shows a second outline when you scroll. The card stays put and only its content moves.",
+        "image": "whatsnew/1.1.1-settings.jpg"
+      }
+    ]
+  },
   "1.1.0": {
     "items": [
       {

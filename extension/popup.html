@@ -28,6 +28,8 @@
 
   <!-- settings -->
   <section id="settings" class="glass card" hidden>
+    <!-- the inner div scrolls, not the card: the card's glass rim must stay put -->
+    <div class="settings-body">
     <h2>Settings</h2>
     <div class="setting">
       <span class="setting-label">Download folder</span>
@@ -89,6 +91,7 @@
       <button id="settingsDone" class="primary">Done</button>
     </div>
     <p id="helperInfo" class="muted small"></p>
+    </div>
   </section>
 
   <main id="main">
