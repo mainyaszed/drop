@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "Drop",
+  "version": "1.0.0",
+  "description": "Drop YouTube & SoundCloud audio to your PC or phone in the best quality, with your own tags and cover art.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAsF/nDVEeD9Cz/YxXsSJSMpiiVtWMnG5+oE8cpsJQxHSnuMcjDOCbdHryZU3gA16WYZb5FCkElgYwbGV3xBnJoiW+Bc/VcpK47jhO3O0RHEqlOEx2aD1oSWb2SL4j8Eg1YYjUJK/wIkkKGcaY60NhCunmE2ec8asELzRpGT5KGC1XNSTucmB/cVIzX8QxBwEKHG+SKEO+Tj6hZDWa9UzlxhM+2TggkhNZfFaSPoR7NmHUKKPJfTT0DWnI5sjyx8JONWkt8VdLXtxd4b80G2lNeTxfg95+000RbN5Zaf/xGK57/mCvyRfSmpfm0cszXv5tqzILF6bUxPts6dMfPNcmXwIDAQAB",
+  "permissions": ["nativeMessaging", "activeTab", "storage", "contextMenus", "scripting", "alarms"],
+  "background": { "service_worker": "background.js" },
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": { "16": "icons/16.png", "32": "icons/32.png", "48": "icons/48.png", "128": "icons/128.png" }
+  },
+  "icons": { "16": "icons/16.png", "32": "icons/32.png", "48": "icons/48.png", "128": "icons/128.png" }
+}

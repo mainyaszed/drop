@@ -1,0 +1,260 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Drop</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <!-- colour behind the glass: crisp in the gaps, blurred through the cards -->
+  <div class="orbs" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+  <!-- the desktop wallpaper (default) or a picture of your choice -->
+  <div id="wallpaper" class="wallpaper" aria-hidden="true" hidden></div>
+  <header class="topbar">
+    <div class="brand"><img src="icons/128.png" alt="Drop" class="brand-logo" /></div>
+    <span id="helperDot" class="status" title="Checking helper…"><i></i><b>Connecting</b></span>
+    <button id="settingsBtn" class="gear-btn" title="Settings" aria-label="Settings">
+      <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+    </button>
+  </header>
+
+  <!-- new version on GitHub -->
+  <div id="updateBar" class="update-bar glass" hidden>
+    <span id="updateText"></span>
+    <button type="button" id="updateBtn" class="primary">Update</button>
+    <button type="button" id="updateLater" class="icon-btn" aria-label="Not now" title="Not now">×</button>
+  </div>
+
+  <!-- settings -->
+  <section id="settings" class="glass card" hidden>
+    <h2>Settings</h2>
+    <div class="setting">
+      <span class="setting-label">Download folder</span>
+      <div class="folder-row">
+        <button type="button" id="folderBtn" class="folder-btn" title="Choose the folder downloads are saved in">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>
+          <span id="folderPath" class="folder-path">Music\Drop</span>
+          <span class="folder-change">Change</span>
+        </button>
+        <button type="button" id="folderReset" class="tool" title="Back to the default folder" aria-label="Use default folder" hidden>
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg>
+        </button>
+      </div>
+      <input type="hidden" id="setDir" />
+    </div>
+    <div class="setting">
+      <span class="setting-label">Default format</span>
+      <!-- segmented buttons instead of a <select>: Windows draws native option lists unstyled -->
+      <div class="formats" id="setFormatSeg" role="radiogroup" aria-label="Default format">
+        <button type="button" class="seg" data-value="best">Best</button>
+        <button type="button" class="seg" data-value="mp3">MP3</button>
+        <button type="button" class="seg" data-value="m4a">M4A</button>
+        <button type="button" class="seg" data-value="flac">FLAC</button>
+      </div>
+      <input type="hidden" id="setFormat" value="best" />
+      <small id="setFormatHint"></small>
+    </div>
+    <div class="setting">
+      <span class="setting-label">Background</span>
+      <div class="formats" id="setBgSeg" role="radiogroup" aria-label="Background">
+        <button type="button" class="seg" data-bg="wallpaper">Wallpaper</button>
+        <button type="button" class="seg" data-bg="custom">Image</button>
+        <button type="button" class="seg" data-bg="orbs">Colors</button>
+      </div>
+      <small id="setBgHint"></small>
+      <input type="file" id="bgFile" accept="image/*" hidden />
+    </div>
+    <label>File name pattern
+      <input id="setPattern" placeholder="{artist} - {title}" />
+      <small>Tokens: {artist} {title} {album} {year} {track}</small>
+    </label>
+    <label>VLC Wi-Fi address
+      <div class="row-inline">
+        <input id="setVlc" placeholder="e.g. 192.168.1.20" spellcheck="false" />
+        <button type="button" id="vlcTest" class="secondary">Test</button>
+      </div>
+      <small>On your phone: VLC › Network › Sharing via Wi-Fi. Type the address it shows.</small>
+    </label>
+    <p id="vlcStatus" class="small muted vlc-status"></p>
+    <div class="row">
+      <button id="updateBtn" class="secondary">Update yt-dlp</button>
+      <button id="settingsDone" class="primary">Done</button>
+    </div>
+    <p id="helperInfo" class="muted small"></p>
+    <p class="small upd-line"><span id="versionInfo" class="muted"></span>
+      <button type="button" id="checkUpdBtn" class="link">Check for updates</button></p>
+  </section>
+
+  <main id="main">
+    <!-- no track on this page -->
+    <!-- shown when the current video also belongs to a playlist -->
+    <div id="scopeBar" class="scope" role="tablist" hidden>
+      <button type="button" class="scope-btn active" data-scope="track" role="tab">This track</button>
+      <button type="button" class="scope-btn" data-scope="playlist" role="tab">Whole playlist<span id="scopeCount"></span></button>
+    </div>
+
+    <section id="empty" class="glass card" hidden>
+      <p class="muted">Open a YouTube or SoundCloud track or playlist, or paste a link:</p>
+      <form id="urlForm" class="row">
+        <input id="urlInput" type="url" placeholder="https://…" required />
+        <button class="primary">Go</button>
+      </form>
+    </section>
+
+    <section id="loading" class="glass card" hidden>
+      <div class="skeleton cover-sk"></div>
+      <div class="skeleton line"></div>
+      <div class="skeleton line short"></div>
+      <p id="loadingMsg" class="muted small center">Reading track info…</p>
+    </section>
+
+    <section id="errorBox" class="glass error" hidden></section>
+
+    <form id="trackForm" class="glass card" hidden>
+      <!-- only while editing one track of a playlist -->
+      <div id="editBar" class="edit-bar" hidden>
+        <button type="button" id="editBack" class="link">‹ Playlist</button>
+        <span id="editLabel" class="muted small"></span>
+      </div>
+      <div class="top">
+        <div class="cover-wrap" id="coverBox" role="button" tabindex="0"
+             title="Click to change, or paste an image (Ctrl+V) / drop one here">
+          <img id="coverImg" alt="Cover art" />
+          <div id="coverNone" class="cover-none" hidden>
+            <span class="plus">+</span>
+            <span>Add cover</span>
+            <small>click · paste · drop</small>
+            <button type="button" id="coverRestore" class="cover-restore">Use original</button>
+          </div>
+          <span id="coverTag" class="cover-tag" hidden>Custom</span>
+          <button type="button" id="coverRemove" class="cover-btn cover-remove" title="Remove cover" aria-label="Remove cover">×</button>
+          <button type="button" id="editBtn" class="cover-btn cover-edit" title="Crop, rotate, flip" aria-label="Edit cover">
+            <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2v14a2 2 0 0 0 2 2h14"/><path d="M18 22V8a2 2 0 0 0-2-2H2"/></svg>
+          </button>
+          <button type="button" id="squareBtn" class="cover-btn cover-square" title="Crop to square" aria-label="Crop to square" aria-pressed="true">1:1</button>
+          <div class="cover-hint">Click or Ctrl+V</div>
+        </div>
+        <div class="top-fields">
+          <div class="source-line"><span id="sourceBadge" class="badge"></span><span id="audioInfo" class="muted small"></span></div>
+          <label>Title <input id="fTitle" required /></label>
+          <label>Artist <input id="fArtist" /></label>
+        </div>
+      </div>
+
+      <input type="checkbox" id="squareCrop" checked hidden />
+      <input type="file" id="coverFile" accept="image/*" hidden />
+
+      <div class="grid-album">
+        <label>Album <input id="fAlbum" /></label>
+        <label>Year <input id="fYear" inputmode="numeric" maxlength="4" /></label>
+        <label>Track # <input id="fTrack" inputmode="numeric" maxlength="3" /></label>
+      </div>
+      <div class="grid2">
+        <label>Genre <input id="fGenre" list="genres" /></label>
+        <label>Album artist <input id="fAlbumArtist" /></label>
+      </div>
+      <datalist id="genres">
+        <option>Hip-Hop</option><option>Rap</option><option>R&amp;B</option><option>Pop</option>
+        <option>Electronic</option><option>House</option><option>Techno</option><option>Drum &amp; Bass</option>
+        <option>Rock</option><option>Jazz</option><option>Lo-Fi</option><option>Soundtrack</option>
+        <option>Afrobeats</option><option>Raï</option><option>Chaabi</option><option>Classical</option>
+      </datalist>
+
+      <label id="filenameRow">File name
+        <div class="filename"><input id="fFilename" /><span id="fExt">.opus</span></div>
+      </label>
+
+      <div id="editActions" class="row edit-actions" hidden>
+        <button type="button" id="editReset" class="secondary">Reset to original</button>
+        <button type="button" id="editDone" class="primary">Done</button>
+      </div>
+      <div class="actions" id="trackActions">
+        <div class="formats" role="radiogroup" aria-label="Format">
+          <button type="button" data-format="best" class="seg">Best</button>
+          <button type="button" data-format="mp3" class="seg">MP3</button>
+          <button type="button" data-format="m4a" class="seg">M4A</button>
+          <button type="button" data-format="flac" class="seg">FLAC</button>
+        </div>
+        <button id="downloadBtn" class="primary big">Download</button>
+        <button type="button" id="vlcBtn" class="vlc-btn" disabled aria-label="Download and send to VLC"
+                title="Send to VLC: set your VLC address in Settings"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="currentColor" d="M10.3 2.5h3.4L18.2 18H5.8z"/><path class="stripe" d="M9 7h6l.73 2.5H8.27z"/><path class="stripe" d="M7.4 12.5h9.2l.73 2.5H6.67z"/><rect fill="currentColor" x="3.5" y="18" width="17" height="3.2" rx="1.4"/></svg></button>
+      </div>
+    </form>
+
+    <form id="playlistForm" class="glass card" hidden>
+      <div class="pl-top">
+        <img id="plCover" class="pl-cover" alt="" />
+        <div class="pl-head">
+          <div class="source-line"><span id="plBadge" class="badge"></span><span id="plMeta" class="muted small"></span></div>
+          <div id="plTitle" class="pl-title"></div>
+        </div>
+      </div>
+      <div class="grid2">
+        <label>Album <input id="plAlbum" /></label>
+        <label>Album artist <input id="plAlbumArtist" /></label>
+      </div>
+      <div class="pl-opts">
+        <label class="check" title="Track numbers in the tags and file names (01 - …)"><input type="checkbox" id="plNumber" checked /> Number tracks</label>
+        <label class="check" title="Save into a folder named after the album"><input type="checkbox" id="plFolder" checked /> Own folder</label>
+      </div>
+      <div class="pl-list-head">
+        <span id="plCount" class="muted small"></span>
+        <button type="button" id="plToggleAll" class="link">Select none</button>
+      </div>
+      <ul id="plList" class="pl-list"></ul>
+      <div class="actions">
+        <div class="formats" role="radiogroup" aria-label="Format">
+          <button type="button" data-format="best" class="seg">Best</button>
+          <button type="button" data-format="mp3" class="seg">MP3</button>
+          <button type="button" data-format="m4a" class="seg">M4A</button>
+          <button type="button" data-format="flac" class="seg">FLAC</button>
+        </div>
+        <button id="plDownloadBtn" class="primary big">Download</button>
+        <button type="button" id="plVlcBtn" class="vlc-btn" disabled aria-label="Send the playlist to VLC"
+                title="Send to VLC: set your VLC address in Settings"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="currentColor" d="M10.3 2.5h3.4L18.2 18H5.8z"/><path class="stripe" d="M9 7h6l.73 2.5H8.27z"/><path class="stripe" d="M7.4 12.5h9.2l.73 2.5H6.67z"/><rect fill="currentColor" x="3.5" y="18" width="17" height="3.2" rx="1.4"/></svg></button>
+      </div>
+    </form>
+
+    <section id="jobsSection" class="glass card lift" hidden>
+      <div class="jobs-head"><h2>Downloads</h2><button id="clearJobs" class="link">Clear</button></div>
+      <ul id="jobs"></ul>
+    </section>
+  </main>
+
+  <!-- cover editor: plain dim layer (no blur, trap 1) + dense glass panel -->
+  <div id="editor" class="editor" hidden>
+    <div class="editor-panel glass dense" role="dialog" aria-label="Edit cover">
+      <div class="editor-head">
+        <h2>Edit cover</h2>
+        <button type="button" id="edClose" class="icon-btn" aria-label="Close">×</button>
+      </div>
+      <div class="stage" id="edStage">
+        <canvas id="edCanvas"></canvas>
+        <div class="thirds"></div>
+        <div id="edLoading" class="stage-msg">Loading image…</div>
+      </div>
+      <p class="muted small center ed-tip">Drag to move · scroll or slider to zoom</p>
+      <div class="ed-tools">
+        <button type="button" id="edRotL" class="tool" title="Rotate left" aria-label="Rotate left">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg>
+        </button>
+        <button type="button" id="edRotR" class="tool" title="Rotate right" aria-label="Rotate right">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg>
+        </button>
+        <button type="button" id="edFlip" class="tool" title="Flip horizontally" aria-label="Flip horizontally">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v18"/><path d="M8 7 3 12l5 5V7z"/><path d="M16 7l5 5-5 5V7z"/></svg>
+        </button>
+        <input type="range" id="edZoom" min="1" max="5" step="0.01" value="1" aria-label="Zoom" />
+        <button type="button" id="edReset" class="link">Reset</button>
+      </div>
+      <div class="row">
+        <button type="button" id="edCancel" class="secondary">Cancel</button>
+        <button type="button" id="edApply" class="primary">Apply</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

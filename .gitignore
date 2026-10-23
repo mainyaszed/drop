@@ -1,0 +1,7 @@
+# build output (Drop-Setup.exe is attached to GitHub releases instead)
+dist/
+# logs can contain local paths
+*.log
+__pycache__/
+*.pyc
+.claude/
