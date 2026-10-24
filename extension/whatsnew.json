@@ -1,5 +1,5 @@
 {
-  "1.2.1": {
+  "1.2.2": {
     "items": [
       {
         "title": "Download videos as MP4",
@@ -12,8 +12,8 @@
         "image": "whatsnew/1.2.0-editor.jpg"
       },
       {
-        "title": "This screen opens by itself",
-        "text": "After Drop updates, What's new now pops up on its own, so you never miss a new feature."
+        "title": "Never miss what's new",
+        "text": "The first time you open Drop after an update, this screen shows up, even if the helper is still restarting."
       }
     ]
   },

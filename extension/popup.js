@@ -1702,7 +1702,6 @@ async function openWhatsNew(version) {
 }
 
 function closeWhatsNew() {
-  if (new URLSearchParams(location.search).has("whatsnew")) return window.close();
   show("#whatsNew", false);
   if ($("#editor").hidden) document.body.classList.remove("editing");
 }
@@ -1927,10 +1926,7 @@ async function init() {
   if (justUpdated) {
     await chrome.storage.local.remove("justUpdated");
     openWhatsNew(justUpdated.to);
-  } else if (new URLSearchParams(location.search).has("whatsnew")) {
-    openWhatsNew(chrome.runtime.getManifest().version);
   }
-  if (new URLSearchParams(location.search).has("whatsnew")) document.body.classList.add("window");
 
   const ok = await checkHelper();
   if (ok) checkVlc().finally(() => { vlcTimer = setTimeout(pollVlc, VLC_POLL_MS); });
