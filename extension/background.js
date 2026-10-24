@@ -238,6 +238,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         return startUpdate(msg.url, msg.version, false);
       case "scTracks":
         return call("sc_tracks", { ids: msg.ids, urls: msg.urls });
+      case "frame":
+        return call("frame", { url: msg.url, t: msg.t });
       case "wallpaper":
         return call("wallpaper", { sig: msg.sig });
       case "playlistInfo":

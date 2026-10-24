@@ -173,6 +173,18 @@
         <div class="filename"><input id="fFilename" /><span id="fExt">.opus</span></div>
       </label>
 
+      <div class="media-row">
+        <div class="formats mode-seg" role="radiogroup" aria-label="Audio or video">
+          <button type="button" class="seg" data-mode="audio">♪ Audio</button>
+          <button type="button" class="seg" data-mode="video">▶ Video</button>
+        </div>
+        <button type="button" id="clipBtn" class="secondary clip-btn" title="Clip, speed and crop">✂ Edit</button>
+      </div>
+      <div id="qualityRow" class="quality-row" role="radiogroup" aria-label="Video quality" hidden></div>
+      <div id="editSummary" class="edit-summary" hidden>
+        <span id="editSummaryText"></span>
+        <button type="button" id="editClear" class="link">Clear</button>
+      </div>
       <div id="editActions" class="row edit-actions" hidden>
         <button type="button" id="editReset" class="secondary">Reset to original</button>
         <button type="button" id="editDone" class="primary">Done</button>
@@ -211,6 +223,18 @@
         <button type="button" id="plToggleAll" class="link">Select none</button>
       </div>
       <ul id="plList" class="pl-list"></ul>
+      <div class="media-row">
+        <div class="formats pl-mode-seg" role="radiogroup" aria-label="Audio or video">
+          <button type="button" class="seg" data-plmode="audio">♪ Audio</button>
+          <button type="button" class="seg" data-plmode="video">▶ Video</button>
+        </div>
+        <div class="formats pl-quality-seg" hidden>
+          <button type="button" class="seg" data-plq="best">Best</button>
+          <button type="button" class="seg" data-plq="1080">1080p</button>
+          <button type="button" class="seg" data-plq="720">720p</button>
+          <button type="button" class="seg" data-plq="480">480p</button>
+        </div>
+      </div>
       <div class="actions">
         <div class="formats" role="radiogroup" aria-label="Format">
           <button type="button" data-format="best" class="seg">Best</button>
@@ -259,6 +283,56 @@
       <div class="row">
         <button type="button" id="edCancel" class="secondary">Cancel</button>
         <button type="button" id="edApply" class="primary">Apply</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- clip / speed / crop editor -->
+  <div id="clipEditor" class="editor" hidden>
+    <div class="editor-panel glass dense clip-panel" role="dialog" aria-label="Edit clip">
+      <div class="editor-head">
+        <h2>Edit</h2>
+        <button type="button" id="clipClose" class="icon-btn" aria-label="Close">×</button>
+      </div>
+      <div class="clip-stage" id="clipStage">
+        <img id="clipFrame" alt="" />
+        <div id="cropBox" class="crop-box" hidden></div>
+        <div id="clipMsg" class="stage-msg" hidden></div>
+        <span id="clipWhich" class="clip-which">Start</span>
+      </div>
+      <div class="range2" id="clipRange">
+        <div class="range2-fill" id="clipFill"></div>
+        <input type="range" id="clipStart" min="0" step="0.1" aria-label="Start" />
+        <input type="range" id="clipEnd" min="0" step="0.1" aria-label="End" />
+      </div>
+      <div class="clip-times">
+        <label>Start <input id="clipStartT" spellcheck="false" /></label>
+        <span id="clipLen" class="muted small"></span>
+        <label>End <input id="clipEndT" spellcheck="false" /></label>
+      </div>
+      <span class="setting-label">Speed</span>
+      <div class="formats speed-seg">
+        <button type="button" class="seg" data-speed="0.5">0.5×</button>
+        <button type="button" class="seg" data-speed="0.75">0.75×</button>
+        <button type="button" class="seg" data-speed="1">1×</button>
+        <button type="button" class="seg" data-speed="1.25">1.25×</button>
+        <button type="button" class="seg" data-speed="1.5">1.5×</button>
+        <button type="button" class="seg" data-speed="2">2×</button>
+      </div>
+      <div id="cropControls">
+        <span class="setting-label">Crop</span>
+        <div class="formats crop-seg">
+          <button type="button" class="seg" data-crop="">Original</button>
+          <button type="button" class="seg" data-crop="1">1:1</button>
+          <button type="button" class="seg" data-crop="0.5625">9:16</button>
+          <button type="button" class="seg" data-crop="1.7778">16:9</button>
+          <button type="button" class="seg" data-crop="0.8">4:5</button>
+        </div>
+        <label class="check fast-cut" title="Cuts on the nearest keyframe: much faster, but can be up to a few seconds off"><input type="checkbox" id="clipFast" /> Fast cut (less exact)</label>
+      </div>
+      <div class="row">
+        <button type="button" id="clipReset" class="secondary">Reset</button>
+        <button type="button" id="clipApply" class="primary">Apply</button>
       </div>
     </div>
   </div>

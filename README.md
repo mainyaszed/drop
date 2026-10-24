@@ -32,6 +32,8 @@ Or by hand:
 Open a track page and click the Drop icon (or right-click a YouTube/SoundCloud link → *Download audio with Drop*).
 
 - **Cover:** the original artwork is grabbed automatically. Click the cover to pick another image, press **Ctrl+V** to paste an image (or an image link), or drop one onto it. Hover the cover for **×** (remove), **1:1** (crop to square, on by default, so 16:9 thumbnails become proper album art) and the **crop icon**, which opens an editor to move, zoom, rotate and flip the cover. "Use original" brings the original artwork back.
+- **Video:** switch **♪ Audio / ▶ Video** to save an MP4 instead. Pick a quality: **Best** (up to 4K/8K when the video has it), 2160p, 1440p, 1080p… Up to 1080p you get H.264 + AAC, which plays everywhere; YouTube only offers VP9/AV1 above that.
+- **✂ Edit:** clip a section (drag the handles or type times; the editor shows the exact frame at each handle), change the speed (0.5×–2×, pitch kept), and for video crop to 1:1, 9:16, 16:9 or 4:5 by dragging the box. *Fast cut* skips re-encoding the cut for speed but can be a few seconds off. Playlists can download as video too.
 - **Formats:**
   | Format | What you get |
   |---|---|

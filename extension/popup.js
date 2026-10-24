@@ -29,6 +29,11 @@ const state = {
   trackUrl: null, // the single track on this page, if any
   plUrl: null, // the playlist on this page, if any
   playlist: null, // playlist_info result for plUrl
+  media: "audio", // "audio" | "video"
+  quality: "best", // video: "best" or a height like "1080"
+  clip: null, // {start, end, speed, crop, exact} from the editor, or null
+  plMedia: "audio",
+  plQuality: "best",
   edits: {}, // per-track playlist edits, by playlist index: {meta?, cover?, square?}
   editIdx: null, // entries[] position of the track being edited, else null
   editBase: null, // that track's values before any edit (to store only what changed)
@@ -148,6 +153,7 @@ function filenameFromPattern() {
 }
 
 function extFor(format) {
+  if (state.media === "video") return "mp4";
   return format === "best" ? state.info?.best_ext || "opus" : format;
 }
 
@@ -496,6 +502,11 @@ function fillForm(info, draft) {
   const mode = { upload: "custom", url: "custom" }[draft?.coverMode] || draft?.coverMode || "thumb";
   setCoverMode(mode === "custom" && !state.coverData && !state.coverLink ? "thumb" : mode);
   $("#fFilename").value = state.filenameEdited ? draft.filename : filenameFromPattern();
+  state.clip = null;
+  ce.frames = {};
+  renderQualities();
+  $(".mode-seg .seg[data-mode=video]").disabled = !info.has_video;
+  setMedia(state.editIdx != null ? "audio" : state.media);
 }
 
 async function download(e, toVlc = false) {
@@ -516,6 +527,7 @@ async function download(e, toVlc = false) {
         filename: sanitize($("#fFilename").value) || filenameFromPattern(),
         out_dir: state.settings.outDir,
         ...(toVlc ? { vlc_url: state.settings.vlc } : {}),
+        ...mediaRequest(),
       },
     });
     if (toVlc) {
@@ -985,6 +997,7 @@ async function downloadPlaylist(e, toVlc = false) {
         pattern: state.settings.pattern,
         out_dir: state.settings.outDir,
         ...(toVlc ? { vlc_url: state.settings.vlc } : {}),
+        mode: state.plMedia, quality: state.plQuality,
       },
       info: { title: $("#plAlbum").value.trim() || state.playlist.title, uploader: state.playlist.uploader },
     });
@@ -995,11 +1008,231 @@ async function downloadPlaylist(e, toVlc = false) {
   setTimeout(updatePlCount, 1200);
 }
 
+// ---------------------------------------------------- video, clip, speed, crop --
+
+const fmtT = (s) => {
+  s = Math.max(0, s || 0);
+  const m = Math.floor(s / 60), sec = s - m * 60;
+  return `${m}:${sec < 10 ? "0" : ""}${sec.toFixed(1)}`;
+};
+const parseT = (v) => {
+  const p = String(v).trim().split(":").map(Number);
+  if (p.some(isNaN)) return null;
+  return p.reduce((a, x) => a * 60 + x, 0);
+};
+
+function mediaRequest() {
+  const req = { mode: state.media, quality: state.quality };
+  const c = state.clip;
+  if (c) {
+    const dur = state.info?.duration || 0;
+    if (c.start > 0.05 || (dur && c.end < dur - 0.05)) req.clip = { start: c.start, end: c.end };
+    req.exact = !c.fast;
+    if (c.speed !== 1) req.speed = c.speed;
+    if (c.crop && state.media === "video") req.crop = c.crop;
+  }
+  return req;
+}
+
+function setMedia(mode) {
+  if (mode === "video" && state.info && !state.info.has_video) mode = "audio";
+  state.media = mode;
+  $$(".mode-seg .seg").forEach((b) => b.classList.toggle("active", b.dataset.mode === mode));
+  $("#trackForm").classList.toggle("video", mode === "video");
+  show("#qualityRow", mode === "video");
+  $$("#trackActions .formats").forEach((f) => (f.hidden = mode === "video"));
+  $("#fExt").textContent = "." + extFor(state.format);
+  renderEditSummary();
+}
+
+function renderQualities() {
+  const hs = (state.info?.heights || []).filter((h) => h >= 240);
+  const label = (h) => (h >= 2160 ? "4K" : h >= 1440 ? "2K" : `${h}p`);
+  const items = [["best", "Best", hs[0] ? label(hs[0]) : ""], ...hs.map((h) => [String(h), `${h}p`, h >= 1440 ? (h >= 2160 ? "4K" : "2K") : ""])];
+  if (!items.some(([v]) => v === state.quality)) state.quality = "best";
+  $("#qualityRow").replaceChildren(...items.map(([v, text, tag]) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "q" + (v === state.quality ? " active" : "");
+    b.textContent = text;
+    if (tag) { const s = document.createElement("small"); s.textContent = tag; b.append(s); }
+    b.title = v === "best" ? "The highest quality this video has" : v >= 1440 ? "VP9/AV1 video (YouTube has no H.264 above 1080p)" : "H.264 MP4: plays everywhere";
+    b.onclick = () => { state.quality = v; renderQualities(); };
+    return b;
+  }));
+}
+
+function renderEditSummary() {
+  const c = state.clip;
+  const parts = [];
+  if (c) {
+    const dur = state.info?.duration || 0;
+    if (c.start > 0.05 || (dur && c.end < dur - 0.05)) parts.push(`✂ ${fmtT(c.start)}–${fmtT(c.end)}`);
+    if (c.speed !== 1) parts.push(`${c.speed}×`);
+    if (c.crop && state.media === "video") parts.push(c.cropName);
+  }
+  $("#editSummaryText").textContent = parts.join(" · ");
+  show("#editSummary", parts.length > 0);
+  $("#clipBtn").classList.toggle("on", parts.length > 0);
+}
+
+// ---- the editor ----
+const ce = { start: 0, end: 0, speed: 1, aspect: "", which: "start", box: null, timer: null, frames: {} };
+
+async function openClipEditor() {
+  if (!state.info) return;
+  const dur = state.info.duration || 0;
+  const c = state.clip || { start: 0, end: dur, speed: 1, crop: null, aspect: "", fast: false };
+  Object.assign(ce, { start: c.start, end: c.end || dur, speed: c.speed, aspect: c.aspect || "", which: "start", box: c.crop ? { ...c.crop } : null });
+  for (const id of ["#clipStart", "#clipEnd"]) { $(id).max = dur; }
+  $("#clipFast").checked = !!c.fast;
+  const video = state.media === "video";
+  show("#cropControls", video);
+  show("#clipEditor");
+  document.body.classList.add("editing");
+  syncClipUI();
+  if (video) loadFrame();
+  else { $("#clipFrame").src = coverSrc() || state.info.thumbnail || ""; show("#cropBox", false); $("#clipWhich").textContent = "Audio"; }
+}
+
+function closeClipEditor() {
+  show("#clipEditor", false);
+  if ($("#editor").hidden && $("#whatsNew").hidden) document.body.classList.remove("editing");
+}
+
+function syncClipUI() {
+  const dur = state.info.duration || 0;
+  $("#clipStart").value = ce.start; $("#clipEnd").value = ce.end;
+  $("#clipStartT").value = fmtT(ce.start); $("#clipEndT").value = fmtT(ce.end);
+  const len = (ce.end - ce.start) / ce.speed;
+  $("#clipLen").textContent = `${fmtT(len)} long`;
+  $("#clipFill").style.left = `${(ce.start / dur) * 100}%`;
+  $("#clipFill").style.width = `${((ce.end - ce.start) / dur) * 100}%`;
+  $$(".speed-seg .seg").forEach((b) => b.classList.toggle("active", Number(b.dataset.speed) === ce.speed));
+  $$(".crop-seg .seg").forEach((b) => b.classList.toggle("active", b.dataset.crop === ce.aspect));
+  placeCropBox();
+}
+
+// show the exact frame at the handle that last moved (fetched by the helper)
+function loadFrame() {
+  if (state.media !== "video") return;
+  clearTimeout(ce.timer);
+  ce.timer = setTimeout(async () => {
+    const t = Math.round((ce.which === "end" ? Math.max(0, ce.end - 0.1) : ce.start) * 10) / 10;
+    $("#clipWhich").textContent = `${ce.which === "end" ? "End" : "Start"} · ${fmtT(t)}`;
+    if (ce.frames[t]) { $("#clipFrame").src = ce.frames[t]; return; }
+    $("#clipStage").classList.add("loading");
+    try {
+      const r = await bg("frame", { url: state.url, t });
+      ce.frames[t] = r.data;
+      $("#clipFrame").src = r.data;
+      show("#clipMsg", false);
+    } catch (e) {
+      if (!$("#clipFrame").getAttribute("src")) $("#clipFrame").src = state.info.thumbnail || "";
+      $("#clipMsg").textContent = /Unknown message/.test(e.message) ? "Reload Drop once to see video frames." : "Couldn't load this frame.";
+      show("#clipMsg");
+    } finally {
+      $("#clipStage").classList.remove("loading");
+    }
+  }, 280);
+}
+
+// crop box: the biggest box of the chosen shape, draggable inside the picture
+function frameRect() {
+  const stage = $("#clipStage").getBoundingClientRect();
+  const vw = state.info.width || 16, vh = state.info.height || 9;
+  const scale = Math.min(stage.width / vw, stage.height / vh);
+  const w = vw * scale, h = vh * scale;
+  return { left: (stage.width - w) / 2, top: (stage.height - h) / 2, w, h, vw, vh };
+}
+
+function placeCropBox() {
+  const box = $("#cropBox");
+  if (!ce.aspect || state.media !== "video") { box.hidden = true; ce.box = null; return; }
+  const f = frameRect();
+  const want = Number(ce.aspect), have = f.vw / f.vh;
+  const w = want < have ? (want / have) : 1, h = want < have ? 1 : (have / want);
+  if (!ce.box || Math.abs(ce.box.w - w) > 0.001 || Math.abs(ce.box.h - h) > 0.001) {
+    ce.box = { x: (1 - w) / 2, y: (1 - h) / 2, w, h };
+  }
+  Object.assign(box.style, {
+    left: `${f.left + ce.box.x * f.w}px`, top: `${f.top + ce.box.y * f.h}px`,
+    width: `${ce.box.w * f.w}px`, height: `${ce.box.h * f.h}px`,
+  });
+  box.hidden = false;
+}
+
+function setupClipEditor() {
+  $("#clipBtn").onclick = openClipEditor;
+  $("#clipClose").onclick = closeClipEditor;
+  $("#clipEditor").onclick = (e) => { if (e.target.id === "clipEditor") closeClipEditor(); };
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("#clipEditor").hidden) closeClipEditor(); });
+  $$(".mode-seg .seg").forEach((b) => (b.onclick = () => setMedia(b.dataset.mode)));
+  $("#editClear").onclick = () => { state.clip = null; renderEditSummary(); };
+
+  const minLen = 0.5;
+  $("#clipStart").oninput = (e) => { ce.start = Math.min(Number(e.target.value), ce.end - minLen); ce.which = "start"; syncClipUI(); loadFrame(); };
+  $("#clipEnd").oninput = (e) => { ce.end = Math.max(Number(e.target.value), ce.start + minLen); ce.which = "end"; syncClipUI(); loadFrame(); };
+  const typed = (which) => (e) => {
+    const v = parseT(e.target.value), dur = state.info.duration || 0;
+    if (v == null) return syncClipUI();
+    if (which === "start") ce.start = Math.min(Math.max(0, v), ce.end - minLen);
+    else ce.end = Math.max(Math.min(dur, v), ce.start + minLen);
+    ce.which = which; syncClipUI(); loadFrame();
+  };
+  $("#clipStartT").onchange = typed("start");
+  $("#clipEndT").onchange = typed("end");
+  $$(".speed-seg .seg").forEach((b) => (b.onclick = () => { ce.speed = Number(b.dataset.speed); syncClipUI(); }));
+  $$(".crop-seg .seg").forEach((b) => (b.onclick = () => { ce.aspect = b.dataset.crop; ce.box = null; syncClipUI(); }));
+
+  // drag the crop box
+  let drag = null;
+  $("#cropBox").onpointerdown = (e) => {
+    e.target.setPointerCapture(e.pointerId);
+    drag = { x: e.clientX, y: e.clientY, box: { ...ce.box } };
+  };
+  $("#cropBox").onpointermove = (e) => {
+    if (!drag) return;
+    const f = frameRect();
+    ce.box.x = Math.min(1 - ce.box.w, Math.max(0, drag.box.x + (e.clientX - drag.x) / f.w));
+    ce.box.y = Math.min(1 - ce.box.h, Math.max(0, drag.box.y + (e.clientY - drag.y) / f.h));
+    placeCropBox();
+  };
+  $("#cropBox").onpointerup = () => { drag = null; };
+
+  $("#clipReset").onclick = () => {
+    Object.assign(ce, { start: 0, end: state.info.duration || 0, speed: 1, aspect: "", box: null, which: "start" });
+    $("#clipFast").checked = false;
+    syncClipUI(); loadFrame();
+  };
+  $("#clipApply").onclick = () => {
+    const names = { "1": "1:1", "0.5625": "9:16", "1.7778": "16:9", "0.8": "4:5" };
+    state.clip = {
+      start: ce.start, end: ce.end, speed: ce.speed, fast: $("#clipFast").checked,
+      aspect: ce.aspect, crop: ce.box ? { ...ce.box } : null, cropName: names[ce.aspect] || "",
+    };
+    closeClipEditor();
+    renderEditSummary();
+  };
+
+  // playlists: audio or video, and a quality
+  const plMode = (m) => {
+    state.plMedia = m;
+    $$(".pl-mode-seg .seg").forEach((b) => b.classList.toggle("active", b.dataset.plmode === m));
+    $(".pl-quality-seg").hidden = m !== "video";
+    $$("#playlistForm .actions .formats").forEach((f) => (f.hidden = m === "video"));
+  };
+  const plQ = (q) => { state.plQuality = q; $$(".pl-quality-seg .seg").forEach((b) => b.classList.toggle("active", b.dataset.plq === q)); };
+  $$(".pl-mode-seg .seg").forEach((b) => (b.onclick = () => plMode(b.dataset.plmode)));
+  $$(".pl-quality-seg .seg").forEach((b) => (b.onclick = () => plQ(b.dataset.plq)));
+  plMode("audio"); plQ("best");
+}
+
 // ------------------------------------------------------------------ jobs --
 
 const STAGE_LABEL = {
   starting: "Starting…", downloading: "Downloading", converting: "Converting…",
-  tagging: "Adding tags & cover…", sending: "Sending to VLC", cancelling: "Stopping…", retrying: "Retrying…",
+  tagging: "Adding tags & cover…", sending: "Sending to VLC", cancelling: "Stopping…", retrying: "Retrying…", editing: "Editing video…",
 };
 
 function cancelLink(id) {
@@ -1590,6 +1823,7 @@ async function init() {
   };
   $("#folderBtn").onclick = pickFolder;
   $("#checkUpdBtn").onclick = checkUpdatesNow;
+  setupClipEditor();
   $("#whatsNewBtn").onclick = () => openWhatsNew();
   $("#wnOk").onclick = closeWhatsNew;
   $("#wnClose").onclick = closeWhatsNew;

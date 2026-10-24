@@ -25,7 +25,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-VERSION = "1.5.0"
+VERSION = "1.6.0"
 HERE = Path(__file__).resolve().parent
 
 # Chrome can hand child processes an SSLKEYLOGFILE pointing at a file we can't
@@ -357,7 +357,48 @@ def cmd_info(msg):
         "audio": describe_audio(info),
         "best_ext": best_ext(info),
         "webpage_url": info.get("webpage_url") or msg["url"],
+        **video_info(info),
     }
+
+
+def video_info(info):
+    """Video qualities on offer and a progressive (audio+video in one file) stream
+    for the editor's live preview."""
+    fmts = info.get("formats") or []
+    heights = sorted({f["height"] for f in fmts if f.get("vcodec") not in (None, "none") and f.get("height")}, reverse=True)
+    progressive = [f for f in fmts if f.get("vcodec") not in (None, "none") and f.get("acodec") not in (None, "none")
+                   and f.get("url") and f.get("protocol", "https").startswith("http") and (f.get("height") or 0) <= 720]
+    prev = max(progressive, key=lambda f: ((f.get("ext") == "mp4"), f.get("height") or 0), default=None)
+    best = max((f for f in fmts if f.get("height")), key=lambda f: f["height"], default={})
+    return {
+        "has_video": bool(heights),
+        "heights": heights,
+        "preview_url": prev and prev["url"],
+        "width": best.get("width"), "height": best.get("height"),
+    }
+
+
+_FRAME_SRC = {}  # url -> (time, stream url, headers): a small video stream to grab editor frames from
+
+
+def cmd_frame(msg):
+    """One video frame at `t` seconds, as a JPEG data: URL, for the clip/crop editor
+    (YouTube no longer offers a stream the popup could play itself)."""
+    url, t = msg["url"], max(0.0, float(msg.get("t") or 0))
+    src = _FRAME_SRC.get(url)
+    if not src or time.time() - src[0] > 1800:  # stream links expire: refresh every 30 min
+        opts = ydl_base_opts() | {"format": "bv*[height<=480]/bv*/b", "format_sort": ["res:480"]}
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+        f = (info.get("requested_formats") or [info])[0]
+        src = _FRAME_SRC[url] = (time.time(), f["url"], f.get("http_headers") or {})
+    headers = "".join(f"{k}: {v}\r\n" for k, v in src[2].items())
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-headers", headers, "-ss", f"{t:.2f}", "-i", src[1],
+           "-frames:v", "1", "-vf", "scale=640:-2", "-q:v", "4", "-f", "image2", "-c:v", "mjpeg", "pipe:1"]
+    r = subprocess.run(cmd, capture_output=True, timeout=40, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    if r.returncode != 0 or not r.stdout:
+        raise RuntimeError("Couldn't grab that frame." + (" " + r.stderr.decode(errors="replace")[-200:] if r.stderr else ""))
+    return {"t": t, "data": "data:image/jpeg;base64," + base64.b64encode(r.stdout).decode("ascii")}
 
 
 def default_dir():
@@ -428,8 +469,11 @@ class Cancelled(Exception):
     pass
 
 
-def fetch_track(url, fmt, tmp, progress, job_id):
-    """Download + convert one track into tmp. Returns (audio_file, info)."""
+def fetch_track(url, fmt, tmp, progress, job_id, mode="audio", quality=None, clip=None, exact=True):
+    """Download + convert one track into tmp. Returns (file, info).
+    mode "video" saves an MP4 (best quality up to `quality` px tall). clip =
+    {"start": s, "end": s} downloads only that section (exact = cut on the exact
+    frame, else the nearest keyframe, which is faster)."""
     def hook(d):
         if job_id in CANCELLED:
             raise Cancelled()
@@ -454,13 +498,66 @@ def fetch_track(url, fmt, tmp, progress, job_id):
         "progress_hooks": [hook],
         "postprocessors": [pp],
     }
+    if mode == "video":
+        # Highest resolution up to the chosen height first (4K/1440p only exist as
+        # VP9/AV1 on YouTube); at equal resolution prefer H.264 + AAC, which plays everywhere.
+        res = f"res:{int(quality)}" if str(quality or "").isdigit() else "res"
+        opts["format"] = "bv*+ba/b"
+        opts["format_sort"] = [res, "fps", "vcodec:h264", "acodec:aac"]
+        opts["merge_output_format"] = "mp4"
+        opts["outtmpl"] = str(tmp / "video.%(ext)s")
+        opts["postprocessors"] = []
+    if clip and clip.get("end"):
+        opts["download_ranges"] = yt_dlp.utils.download_range_func(None, [(float(clip.get("start") or 0), float(clip["end"]))])
+        # audio-only streams can only be split coarsely (a "fast" 10 s clip came out ~20 s),
+        # and cutting audio exactly is cheap: only video gets the fast option
+        opts["force_keyframes_at_cuts"] = bool(exact) or mode != "video"
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=True)
-    files = [f for f in tmp.iterdir() if f.is_file() and f.suffix.lower() in
-             (".mp3", ".m4a", ".opus", ".flac", ".ogg", ".aac", ".wav")]
+    exts = (".mp4", ".mkv", ".webm", ".mov") if mode == "video" else (".mp3", ".m4a", ".opus", ".flac", ".ogg", ".aac", ".wav")
+    files = [f for f in tmp.iterdir() if f.is_file() and f.suffix.lower() in exts]
     if not files:
-        raise RuntimeError("Download finished but no audio file was produced.")
+        raise RuntimeError("Download finished but no file was produced.")
     return files[0], info
+
+
+_AUDIO_ENC = {".mp3": ["-c:a", "libmp3lame", "-b:a", "320k"], ".m4a": ["-c:a", "aac", "-b:a", "256k"],
+              ".opus": ["-c:a", "libopus", "-b:a", "160k"], ".ogg": ["-c:a", "libvorbis", "-q:a", "6"],
+              ".flac": ["-c:a", "flac"], ".wav": ["-c:a", "pcm_s16le"]}
+
+
+def apply_edits(path, speed=1.0, crop=None, progress=None):
+    """Speed (0.5-2x, audio pitch kept) and crop ({x,y,w,h} as fractions of the
+    frame) in one ffmpeg pass. Returns the new file (or the same one if nothing to do)."""
+    speed = float(speed or 1)
+    is_video = path.suffix.lower() in (".mp4", ".mkv", ".webm", ".mov")
+    if not (is_video and crop and (float(crop.get("w", 1)) < 0.999 or float(crop.get("h", 1)) < 0.999)):
+        crop = None  # no crop for audio, or when the box is the whole frame
+    if abs(speed - 1) < 0.01 and not crop:
+        return path
+    if progress:
+        progress("editing", 100)
+    out = path.with_name("edited" + (".mp4" if is_video else path.suffix.lower()))
+    cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", str(path)]
+    if is_video:
+        vf = []
+        if crop:
+            x, y, w, h = (float(crop[k]) for k in ("x", "y", "w", "h"))
+            vf.append(f"crop=trunc(iw*{w}/2)*2:trunc(ih*{h}/2)*2:trunc(iw*{x}):trunc(ih*{y})")
+        if abs(speed - 1) >= 0.01:
+            vf.append(f"setpts=PTS/{speed}")
+        cmd += ["-vf", ",".join(vf), "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p"]
+        if abs(speed - 1) >= 0.01:
+            cmd += ["-af", f"atempo={speed}"]
+        cmd += ["-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"]
+    else:
+        cmd += ["-vn", "-af", f"atempo={speed}"] + _AUDIO_ENC.get(path.suffix.lower(), [])
+    cmd.append(str(out))
+    r = subprocess.run(cmd, capture_output=True, text=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    if r.returncode != 0 or not out.exists():
+        raise RuntimeError("Editing failed: " + (r.stderr.strip()[-300:] or "ffmpeg error"))
+    path.unlink(missing_ok=True)
+    return out
 
 
 def finish_track(audio_file, stem, out_dir, vlc_url, progress):
@@ -510,7 +607,10 @@ def run_download(job_id, msg):
     try:
         check_ffmpeg()
         progress("starting", 0)
-        audio_file, info = fetch_track(msg["url"], fmt, tmp, progress, job_id)
+        mode = msg.get("mode", "audio")
+        audio_file, info = fetch_track(msg["url"], fmt, tmp, progress, job_id, mode=mode,
+                                       quality=msg.get("quality"), clip=msg.get("clip"), exact=msg.get("exact", True))
+        audio_file = apply_edits(audio_file, msg.get("speed", 1), msg.get("crop"), progress)
 
         progress("tagging", 100)
         cover = None
@@ -691,7 +791,8 @@ def run_playlist(job_id, msg):
             progress("starting")
             for attempt in range(3):
                 try:
-                    audio_file, info = fetch_track(item["url"], fmt, tmp, progress, job_id)
+                    audio_file, info = fetch_track(item["url"], fmt, tmp, progress, job_id,
+                                                   mode=msg.get("mode", "audio"), quality=msg.get("quality"))
                     rate_limited = 0
                     break
                 except Cancelled:
@@ -1099,7 +1200,8 @@ COMMANDS = {"ping": cmd_ping, "info": cmd_info, "download": cmd_download,
             "vlc_ping": cmd_vlc_ping, "vlc_send": cmd_vlc_send, "pick_folder": cmd_pick_folder,
             "playlist_info": cmd_playlist_info, "download_playlist": cmd_download_playlist, "cancel": cmd_cancel,
             "wallpaper": cmd_wallpaper, "sc_tracks": cmd_sc_tracks,
-            "check_update": cmd_check_update, "installed_version": cmd_installed_version, "install_update": cmd_install_update}
+            "check_update": cmd_check_update, "installed_version": cmd_installed_version, "install_update": cmd_install_update,
+            "frame": cmd_frame}
 
 
 def handle(msg):
@@ -1121,7 +1223,7 @@ def main():
         if msg is None:
             break
         # slow commands (network) must never block the reader loop
-        if msg.get("cmd") in ("info", "update", "vlc_ping", "vlc_send", "pick_folder", "playlist_info", "wallpaper", "sc_tracks", "check_update", "install_update"):
+        if msg.get("cmd") in ("info", "update", "vlc_ping", "vlc_send", "pick_folder", "playlist_info", "wallpaper", "sc_tracks", "check_update", "install_update", "frame"):
             threading.Thread(target=handle, args=(msg,), daemon=True).start()
         else:
             handle(msg)
