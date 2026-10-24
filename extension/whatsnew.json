@@ -1,4 +1,13 @@
 {
+  "1.1.2": {
+    "items": [
+      {
+        "title": "Big playlists download reliably",
+        "text": "Long playlist or song names no longer fail to save, hiccups are retried automatically, and if YouTube starts limiting your connection Drop slows down and tells you. Anything that didn't make it gets a Retry failed button.",
+        "image": "whatsnew/1.1.2-retry.jpg"
+      }
+    ]
+  },
   "1.1.1": {
     "items": [
       {

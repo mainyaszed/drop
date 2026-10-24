@@ -84,11 +84,11 @@ function onHostMessage(msg) {
     updateJob(msg.id, {
       status: "done", stage: "done", percent: 100, path: msg.path, audio: msg.audio, ext: msg.ext,
       vlc: msg.vlc || null, vlcError: msg.vlc_error || null,
-      summary: msg.playlist || null, skipped: msg.skipped_list || null,
+      summary: msg.playlist || null, skipped: msg.skipped_list || null, failed: msg.failed || null,
     });
     setBadge();
   } else if (msg.type === "error") {
-    updateJob(msg.id, { status: "error", error: msg.error, cancelled: !!msg.cancelled, summary: msg.playlist || null });
+    updateJob(msg.id, { status: "error", error: msg.error, cancelled: !!msg.cancelled, summary: msg.playlist || null, failed: msg.failed || null });
     setBadge();
   }
 }
@@ -123,6 +123,7 @@ async function startPlaylist(req, info) {
     artist: info.uploader,
     format: req.format,
     toVlc: !!req.vlc_url,
+    request: req, // kept so "Retry failed" can re-run just the failed tracks
   });
   setBadge();
   connect().postMessage({ id, cmd: "download_playlist", ...req });
@@ -268,6 +269,12 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           await updateJob(msg.jobId, { vlc: null, vlcError: e.message });
           throw e;
         }
+        return {};
+      }
+      case "clearJob": {
+        const jobs = await getJobs();
+        delete jobs[msg.jobId];
+        await chrome.storage.session.set({ jobs });
         return {};
       }
       case "clearJobs": {

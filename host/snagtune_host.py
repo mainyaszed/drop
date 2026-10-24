@@ -375,6 +375,18 @@ def safe_filename(name):
     return name[:180] or "track"
 
 
+MAX_PATH_LEN = 240  # Windows' classic limit is 260; keep room for " (2)" and the like
+
+
+def fit_stem(folder, stem, ext):
+    """Shorten a file name so folder + name stays under the Windows path limit
+    (long-path support is off on most PCs: longer paths just fail to save)."""
+    room = MAX_PATH_LEN - len(str(folder)) - 1 - len(ext)
+    if len(stem) > room:
+        stem = stem[:max(room, 20)].rstrip(" .-")
+    return stem or "track"
+
+
 def unique_path(folder, stem, ext):
     p = folder / f"{stem}{ext}"
     i = 2
@@ -471,7 +483,7 @@ def finish_track(audio_file, stem, out_dir, vlc_url, progress):
             log.warning("VLC send failed: %s", e)
             res["vlc_error"] = friendly_error(e) + " Saved it to your PC instead."
     out_dir.mkdir(parents=True, exist_ok=True)
-    final = unique_path(out_dir, stem, ext)
+    final = unique_path(out_dir, fit_stem(out_dir, stem, ext), ext)
     shutil.move(str(audio_file), final)
     res["path"] = str(final)
     return res
@@ -618,6 +630,27 @@ def cmd_sc_tracks(msg):
     return {"tracks": tracks, "entries": entries}
 
 
+# Errors that won't go away by trying again: skip these tracks straight away.
+_PERMANENT = re.compile(
+    r"private video|video unavailable|has been removed|not available in your country|"
+    r"confirm your age|age-restricted|members[- ]only|join this channel|copyright|"
+    r"account associated with this video|premieres in|live event will begin|does not exist|404",
+    re.I)
+# YouTube telling this connection to slow down: wait longer before trying again.
+_RATE_LIMIT = re.compile(r"sign in to confirm|not a bot|HTTP Error 429|too many requests|rate.?limit", re.I)
+
+
+def _wait(seconds, job_id, tick=None):
+    """Sleep in small steps so Cancel still works."""
+    end = time.time() + seconds
+    while time.time() < end:
+        if job_id in CANCELLED:
+            raise Cancelled()
+        if tick:
+            tick(int(end - time.time()) + 1)
+        time.sleep(0.5)
+
+
 def run_playlist(job_id, msg):
     """Download the chosen playlist entries one by one. One bad track (private,
     removed, region-locked) is skipped instead of stopping the whole run."""
@@ -628,8 +661,14 @@ def run_playlist(job_id, msg):
     album_artist = (msg.get("album_artist") or "").strip()
     out_dir = resolve_out_dir(msg)
     if msg.get("subfolder", True) and album:
-        out_dir = out_dir / safe_filename(album)
+        name = safe_filename(album)
+        if len(name) > 60:  # long playlist titles make paths too long for Windows: cut at a word
+            name = name[:60].rsplit(" ", 1)[0]
+        out_dir = out_dir / name.rstrip(" .-&")
     saved, sent, skipped, cancelled = 0, 0, [], False
+    failed = []          # entries to offer for "Retry failed"
+    rate_limited = 0     # rate-limit hits in a row
+    stopped_early = False
 
     for k, item in enumerate(items):
         if job_id in CANCELLED:
@@ -650,7 +689,30 @@ def run_playlist(job_id, msg):
         try:
             check_ffmpeg()
             progress("starting")
-            audio_file, info = fetch_track(item["url"], fmt, tmp, progress, job_id)
+            for attempt in range(3):
+                try:
+                    audio_file, info = fetch_track(item["url"], fmt, tmp, progress, job_id)
+                    rate_limited = 0
+                    break
+                except Cancelled:
+                    raise
+                except Exception as e:
+                    text = str(e)
+                    if _PERMANENT.search(text) or attempt == 2:
+                        raise
+                    if _RATE_LIMIT.search(text):
+                        rate_limited += 1
+                        if rate_limited >= 3:
+                            raise
+                        pause = 60 * rate_limited
+                    else:
+                        pause = (5, 15)[attempt]
+                    log.info("Retrying %s in %ss (%s)", item.get("url"), pause, text[:200])
+                    for f in tmp.iterdir():
+                        f.unlink(missing_ok=True) if f.is_file() else shutil.rmtree(f, ignore_errors=True)
+                    _wait(pause, job_id, lambda left: send({
+                        "id": job_id, "type": "progress", "stage": "retrying", "percent": round(k / n * 100, 1),
+                        "item": k + 1, "total": n, "current": item.get("title"), "eta": left}))
             progress("tagging")
             meta = guess_metadata(info)
             if album:
@@ -682,21 +744,38 @@ def run_playlist(job_id, msg):
             break
         except Exception as e:
             log.warning("Playlist item failed (%s): %s", item.get("url"), e)
-            skipped.append(f"{item.get('title') or item.get('url')}: {friendly_error(e)}")
+            reason = friendly_error(e)
+            skipped.append(f"{item.get('title') or item.get('url')}: {reason}")
+            failed.append({"index": item.get("index"), "url": item.get("url"), "title": item.get("title"), "error": reason})
+            if rate_limited >= 3:
+                # YouTube keeps refusing this connection: stop instead of failing every track left
+                stopped_early = True
+                for rest in items[k + 1:]:
+                    failed.append({"index": rest.get("index"), "url": rest.get("url"), "title": rest.get("title"),
+                                   "error": "Not tried: YouTube was limiting downloads"})
+                break
         finally:
             remove_tmp(tmp)
+        # a short breather between tracks: rapid-fire requests are what trigger YouTube's limits
+        if k + 1 < n:
+            try:
+                _wait(0.8, job_id)
+            except Cancelled:
+                cancelled = True
+                break
 
     CANCELLED.discard(job_id)
     local = saved - sent
-    summary = {"saved": saved, "sent": sent, "skipped": len(skipped), "total": n, "cancelled": cancelled}
+    summary = {"saved": saved, "sent": sent, "skipped": len(failed), "total": n, "cancelled": cancelled,
+               "rate_limited": stopped_early}
     if saved == 0:
         send({"id": job_id, "type": "error", "cancelled": cancelled,
               "error": "Cancelled." if cancelled else (skipped[0] if skipped else "Nothing was downloaded."),
-              "playlist": summary})
+              "playlist": summary, "failed": failed})
         return
     send({"id": job_id, "type": "done", "ext": fmt, "playlist": summary,
           "path": str(out_dir) if local else None, "vlc": "sent" if sent and not local else None,
-          "skipped_list": skipped[:8]})
+          "skipped_list": skipped[:60], "failed": failed})
 
 
 def cmd_download_playlist(msg):
@@ -712,8 +791,11 @@ def cmd_cancel(msg):
 def friendly_error(e):
     text = re.sub(r"\x1b\[[0-9;]*m", "", str(e))
     text = text.replace("ERROR: ", "")
-    if "Sign in to confirm" in text:
-        text += " (YouTube is rate-limiting you. Try the 'Update yt-dlp' button, or wait a bit.)"
+    if _RATE_LIMIT.search(text):
+        text = ("YouTube is limiting downloads from your connection (too many in a row). "
+                "Wait a few minutes, then use Retry failed. Updating yt-dlp in Settings can help too.")
+    elif isinstance(e, FileNotFoundError) and len(str(getattr(e, "filename", "") or "")) > 200:
+        text = "The file path was too long for Windows."
     return text
 
 

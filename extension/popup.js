@@ -999,7 +999,7 @@ async function downloadPlaylist(e, toVlc = false) {
 
 const STAGE_LABEL = {
   starting: "Starting…", downloading: "Downloading", converting: "Converting…",
-  tagging: "Adding tags & cover…", sending: "Sending to VLC", cancelling: "Stopping…",
+  tagging: "Adding tags & cover…", sending: "Sending to VLC", cancelling: "Stopping…", retrying: "Retrying…",
 };
 
 function cancelLink(id) {
@@ -1014,8 +1014,8 @@ function cancelLink(id) {
 function playlistRow(id, j, left, right, li) {
   const s = j.summary || {};
   if (j.status === "running") {
-    left.textContent = j.stage === "cancelling"
-      ? "Stopping…"
+    left.textContent = j.stage === "cancelling" ? "Stopping…"
+      : j.stage === "retrying" ? `Retrying track ${j.item} of ${j.total}${j.eta ? ` in ${j.eta}s` : ""}…`
       : `${j.toVlc ? "Sending" : "Downloading"} ${j.item || 0} of ${j.total}`;
     right.append(`${Math.round(j.percent || 0)}% · `, cancelLink(id));
   } else if (j.status === "done") {
@@ -1035,13 +1035,42 @@ function playlistRow(id, j, left, right, li) {
     if (s.skipped) {
       const err = document.createElement("div");
       err.className = "err";
-      err.textContent = `${s.skipped} skipped: ${(j.skipped || [])[0] || ""}`;
+      err.textContent = s.rate_limited
+        ? `${s.skipped} not downloaded: YouTube is limiting your connection. Wait a few minutes, then Retry failed.`
+        : `${s.skipped} skipped: ${(j.skipped || [])[0] || ""}`;
       err.title = (j.skipped || []).join("\n");
       li.append(err);
     }
+    retryLink(id, j, right);
   } else {
     left.textContent = j.cancelled ? "Cancelled" : "Failed";
+    retryLink(id, j, right);
   }
+}
+
+// "Retry failed (N)": start a new playlist job with only the tracks that didn't make it.
+function retryLink(id, j, right) {
+  const failed = (j.failed || []).filter((f) => f.url);
+  if (!failed.length || !j.request) return;
+  const want = new Set(failed.map((f) => f.url));
+  const b = document.createElement("button");
+  b.className = "link";
+  b.textContent = `Retry failed (${failed.length})`;
+  b.onclick = async () => {
+    b.disabled = true;
+    try {
+      await bg("downloadPlaylist", {
+        request: { ...j.request, entries: j.request.entries.filter((e) => want.has(e.url)) },
+        info: { title: j.title, uploader: j.artist },
+      });
+      await bg("clearJob", { jobId: id });
+    } catch (e) {
+      showError(e.message);
+      b.disabled = false;
+    }
+  };
+  if (right.childNodes.length) right.append(" · ");
+  right.append(b);
 }
 const hasPercent = (j) => (j.stage === "downloading" || j.stage === "sending") && j.percent != null;
 
