@@ -1,4 +1,31 @@
 {
+  "1.2.3": {
+    "items": [
+      {
+        "title": "Drop remembers where you were",
+        "text": "Go check the video and come back: your Video choice, quality, cuts, speed and crop are all still there, and the Edit window reopens right where you left it.",
+        "image": "whatsnew/1.2.0-editor.jpg"
+      },
+      {
+        "title": "⏱ Now",
+        "text": "Pause the video where you want to cut, open Drop and press ⏱ Now next to Start or End to use that exact time."
+      },
+      {
+        "title": "Download videos as MP4",
+        "text": "Switch to Video and pick the quality you want, all the way up to 4K when the video has it. Up to 1080p you get H.264 MP4s that play everywhere.",
+        "image": "whatsnew/1.2.0-video.jpg"
+      },
+      {
+        "title": "Clip, speed up and crop",
+        "text": "Tap ✂ Edit to keep only the part you want, change the speed from 0.5× to 2×, and crop to 1:1, 9:16, 16:9 or 4:5. Drag the box to choose what stays. Clips and speed work for audio too.",
+        "image": "whatsnew/1.2.0-editor.jpg"
+      },
+      {
+        "title": "Never miss what's new",
+        "text": "The first time you open Drop after an update, this screen shows up, even if the helper is still restarting."
+      }
+    ]
+  },
   "1.2.2": {
     "items": [
       {
