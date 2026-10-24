@@ -300,6 +300,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 chrome.runtime.onInstalled.addListener((d) => {
   if (d.reason === "update" && d.previousVersion && d.previousVersion !== CURRENT) {
     chrome.storage.local.set({ justUpdated: { from: d.previousVersion, to: CURRENT } });
+    // show What's new right away, without waiting for the popup to be opened
+    chrome.windows.create({ url: "popup.html?whatsnew=1", type: "popup", width: 420, height: 640 }).catch(() => {});
   }
   chrome.alarms.create("update-check", { delayInMinutes: 1, periodInMinutes: 360 });
   chrome.contextMenus.create({
