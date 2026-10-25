@@ -9,6 +9,7 @@ import base64
 import io
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -312,8 +313,44 @@ def tag_file(path, meta, cover_jpeg):
             else:
                 audio["metadata_block_picture"] = [base64.b64encode(pic.write()).decode("ascii")]
         audio.save()
+    elif ext in (".mp4", ".mov", ".mkv", ".webm"):
+        tag_video(path, m, cover_jpeg)
     else:
         log.warning("No tagger for %s", ext)
+
+
+def tag_video(path, m, cover_jpeg):
+    """Title/artist plus the thumbnail inside the video, like an album cover:
+    MP4 gets it as a cover picture stream (Explorer and players show it), MKV as
+    an attached cover.jpg. WebM has no place for pictures, so only the tags."""
+    ext = path.suffix.lower()
+    tmp = path.with_name("tagged" + ext)
+    cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-nostdin", "-i", str(path)]
+    cover = None
+    if cover_jpeg and ext != ".webm":
+        cover = path.with_name("cover.jpg")
+        cover.write_bytes(cover_jpeg)
+    if cover and ext in (".mp4", ".mov"):
+        cmd += ["-i", str(cover), "-map", "0:v:0", "-map", "0:a?", "-map", "1", "-c", "copy",
+                "-c:v:1", "mjpeg", "-disposition:v:1", "attached_pic"]
+    else:
+        cmd += ["-map", "0", "-c", "copy"]
+        if cover:  # mkv
+            cmd += ["-attach", str(cover), "-metadata:s:t", "mimetype=image/jpeg", "-metadata:s:t", "filename=cover.jpg"]
+    for key, tag in (("title", "title"), ("artist", "artist"), ("album", "album"), ("year", "date"), ("comment", "comment")):
+        if m.get(key):
+            cmd += ["-metadata", f"{tag}={m[key]}"]
+    if ext in (".mp4", ".mov"):
+        cmd += ["-movflags", "+faststart"]
+    cmd.append(str(tmp))
+    r = subprocess.run(cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    if cover:
+        cover.unlink(missing_ok=True)
+    if r.returncode != 0 or not tmp.exists():
+        tmp.unlink(missing_ok=True)
+        raise RuntimeError("Couldn't add the thumbnail: " + (r.stderr.strip()[-200:] or "ffmpeg error"))
+    os.replace(tmp, path)
 
 
 # --------------------------------------------------------------- commands --
@@ -369,12 +406,17 @@ def video_info(info):
     progressive = [f for f in fmts if f.get("vcodec") not in (None, "none") and f.get("acodec") not in (None, "none")
                    and f.get("url") and f.get("protocol", "https").startswith("http") and (f.get("height") or 0) <= 720]
     prev = max(progressive, key=lambda f: ((f.get("ext") == "mp4"), f.get("height") or 0), default=None)
-    best = max((f for f in fmts if f.get("height")), key=lambda f: f["height"], default={})
+    vids = [f for f in fmts if f.get("vcodec") not in (None, "none") and f.get("height") and f.get("width")]
+    best = max(vids, key=lambda f: (f["height"], f["width"]), default={})
     return {
         "has_video": bool(heights),
         "heights": heights,
         "preview_url": prev and prev["url"],
         "width": best.get("width"), "height": best.get("height"),
+        "fps": best.get("fps"),
+        "vcodec": (best.get("vcodec") or "").split(".")[0] or None,
+        "views": info.get("view_count"),
+        "upload_date": info.get("upload_date"),
     }
 
 
@@ -399,6 +441,40 @@ def cmd_frame(msg):
     if r.returncode != 0 or not r.stdout:
         raise RuntimeError("Couldn't grab that frame." + (" " + r.stderr.decode(errors="replace")[-200:] if r.stderr else ""))
     return {"t": t, "data": "data:image/jpeg;base64," + base64.b64encode(r.stdout).decode("ascii")}
+
+
+_AUDIO_SRC = {}  # url -> (time, stream url, headers)
+
+
+def cmd_audio_preview(msg):
+    """30 s of the song from `t`, as an MP3 data: URL: the popup plays it with the
+    effects applied live (Web Audio), so sliders react instantly."""
+    url, t = msg["url"], max(0.0, float(msg.get("t") or 0))
+    src = _AUDIO_SRC.get(url)
+    if not src or time.time() - src[0] > 1800:
+        with yt_dlp.YoutubeDL(ydl_base_opts() | {"format": "bestaudio/best"}) as ydl:
+            info = ydl.extract_info(url, download=False)
+        f = (info.get("requested_formats") or [info])[0]
+        src = _AUDIO_SRC[url] = (time.time(), f["url"], f.get("http_headers") or {})
+    headers = "".join(f"{k}: {v}\r\n" for k, v in src[2].items())
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-headers", headers, "-ss", f"{t:.1f}",
+           "-i", src[1], "-t", "30", "-vn", "-ac", "2", "-ar", "44100", "-c:a", "libmp3lame", "-b:a", "128k", "-f", "mp3", "pipe:1"]
+    r = subprocess.run(cmd, capture_output=True, timeout=60, stdin=subprocess.DEVNULL,
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    if r.returncode != 0 or len(r.stdout) < 1000:
+        raise RuntimeError("Couldn't load a preview." + (" " + r.stderr.decode(errors="replace")[-200:] if r.stderr else ""))
+    return {"data": "data:audio/mpeg;base64," + base64.b64encode(r.stdout).decode("ascii")}
+
+
+# reverb = a dozen fading echoes; the popup's preview uses the very same taps
+REVERB_TAPS = [(37, 0), (61, 1), (89, 2), (127, 3), (173, 4), (229, 5), (293, 6), (367, 7), (449, 8), (541, 9), (643, 10), (757, 11)]
+
+
+def reverb_filter(amount):
+    decays = [amount * 0.55 * math.exp(-k * 0.28) for _, k in REVERB_TAPS]
+    out_gain = 1 / (1 + sum(decays) * 0.5)
+    return (f"aecho=1:{out_gain:.3f}:" + "|".join(str(d) for d, _ in REVERB_TAPS) + ":"
+            + "|".join(f"{x:.3f}" for x in decays))
 
 
 def default_dir():
@@ -469,7 +545,7 @@ class Cancelled(Exception):
     pass
 
 
-def fetch_track(url, fmt, tmp, progress, job_id, mode="audio", quality=None, clip=None, exact=True):
+def fetch_track(url, fmt, tmp, progress, job_id, mode="audio", quality=None, clip=None, exact=True, vformat="mp4"):
     """Download + convert one track into tmp. Returns (file, info).
     mode "video" saves an MP4 (best quality up to `quality` px tall). clip =
     {"start": s, "end": s} downloads only that section (exact = cut on the exact
@@ -480,10 +556,22 @@ def fetch_track(url, fmt, tmp, progress, job_id, mode="audio", quality=None, cli
         if d["status"] == "downloading":
             total = d.get("total_bytes") or d.get("total_bytes_estimate")
             pct = (d.get("downloaded_bytes", 0) / total * 100) if total else None
-            progress("downloading", round(pct, 1) if pct is not None else None,
+            if clip and pct is None:  # sections stream through ffmpeg with no known size
+                return progress("cutting", None)
+            if mode == "video" and pct is not None:
+                # the video stream is ~90% of the bytes, the audio stream the rest
+                is_audio = (d.get("info_dict") or {}).get("vcodec") in (None, "none")
+                pct = 90 + pct * 0.1 if is_audio else pct * 0.9
+            progress("downloading", round(min(pct, 100), 1) if pct is not None else None,
                      speed=d.get("speed"), eta=d.get("eta"))
-        elif d["status"] == "finished":
+        elif d["status"] == "finished" and mode != "video":
             progress("converting", 100)
+
+    def pp_hook(d):
+        if job_id in CANCELLED:
+            raise Cancelled()
+        if d["status"] == "started" and d.get("postprocessor") in ("Merger", "FFmpegMerger"):
+            progress("merging", None)
 
     pp = {"key": "FFmpegExtractAudio", "preferredcodec": fmt if fmt != "best" else "best"}
     if fmt == "mp3":
@@ -496,6 +584,7 @@ def fetch_track(url, fmt, tmp, progress, job_id, mode="audio", quality=None, cli
         "format": "bestaudio[ext=m4a]/bestaudio/best" if fmt == "m4a" else "bestaudio/best",
         "outtmpl": str(tmp / "audio.%(ext)s"),
         "progress_hooks": [hook],
+        "postprocessor_hooks": [pp_hook],
         "postprocessors": [pp],
     }
     if mode == "video":
@@ -503,8 +592,13 @@ def fetch_track(url, fmt, tmp, progress, job_id, mode="audio", quality=None, cli
         # VP9/AV1 on YouTube); at equal resolution prefer H.264 + AAC, which plays everywhere.
         res = f"res:{int(quality)}" if str(quality or "").isdigit() else "res"
         opts["format"] = "bv*+ba/b"
-        opts["format_sort"] = [res, "fps", "vcodec:h264", "acodec:aac"]
-        opts["merge_output_format"] = "mp4"
+        if vformat == "webm":
+            # VP9/AV1 + Opus fit WebM; fall back to MKV if only H.264 exists
+            opts["format_sort"] = [res, "fps", "vcodec:vp9", "acodec:opus"]
+            opts["merge_output_format"] = "webm/mkv"
+        else:
+            opts["format_sort"] = [res, "fps", "vcodec:h264", "acodec:aac"]
+            opts["merge_output_format"] = "mkv" if vformat == "mkv" else "mp4"
         opts["outtmpl"] = str(tmp / "video.%(ext)s")
         opts["postprocessors"] = []
     if clip and clip.get("end"):
@@ -526,19 +620,23 @@ _AUDIO_ENC = {".mp3": ["-c:a", "libmp3lame", "-b:a", "320k"], ".m4a": ["-c:a", "
               ".flac": ["-c:a", "flac"], ".wav": ["-c:a", "pcm_s16le"]}
 
 
-def apply_edits(path, speed=1.0, crop=None, progress=None):
+def apply_edits(path, speed=1.0, crop=None, progress=None, duration=None, fx=None):
     """Speed (0.5-2x, audio pitch kept) and crop ({x,y,w,h} as fractions of the
     frame) in one ffmpeg pass. Returns the new file (or the same one if nothing to do)."""
     speed = float(speed or 1)
     is_video = path.suffix.lower() in (".mp4", ".mkv", ".webm", ".mov")
     if not (is_video and crop and (float(crop.get("w", 1)) < 0.999 or float(crop.get("h", 1)) < 0.999)):
         crop = None  # no crop for audio, or when the box is the whole frame
-    if abs(speed - 1) < 0.01 and not crop:
+    fx = (fx or {}) if not is_video else {}
+    reverb = min(1.0, max(0.0, float(fx.get("reverb") or 0)))
+    bass = min(15.0, max(0.0, float(fx.get("bass") or 0)))
+    if abs(speed - 1) < 0.01 and not crop and reverb < 0.01 and bass < 0.1:
         return path
     if progress:
-        progress("editing", 100)
-    out = path.with_name("edited" + (".mp4" if is_video else path.suffix.lower()))
-    cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", str(path)]
+        progress("editing", 0 if duration else None)
+    ext = path.suffix.lower()
+    out = path.with_name("edited" + ext)
+    cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-nostdin", "-nostats", "-progress", "pipe:1", "-i", str(path)]
     if is_video:
         vf = []
         if crop:
@@ -546,16 +644,51 @@ def apply_edits(path, speed=1.0, crop=None, progress=None):
             vf.append(f"crop=trunc(iw*{w}/2)*2:trunc(ih*{h}/2)*2:trunc(iw*{x}):trunc(ih*{y})")
         if abs(speed - 1) >= 0.01:
             vf.append(f"setpts=PTS/{speed}")
-        cmd += ["-vf", ",".join(vf), "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p"]
+        if ext == ".webm":  # VP9 in its fastest mode + Opus
+            cmd += ["-vf", ",".join(vf), "-c:v", "libvpx-vp9", "-deadline", "realtime", "-cpu-used", "8",
+                    "-row-mt", "1", "-crf", "30", "-b:v", "0", "-pix_fmt", "yuv420p"]
+        else:
+            cmd += ["-vf", ",".join(vf), "-c:v", "libx264", "-preset", "superfast", "-crf", "19", "-pix_fmt", "yuv420p"]
         if abs(speed - 1) >= 0.01:
             cmd += ["-af", f"atempo={speed}"]
-        cmd += ["-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"]
+        if ext == ".webm":
+            cmd += ["-c:a", "libopus", "-b:a", "160k"]
+        else:
+            cmd += ["-c:a", "aac", "-b:a", "192k"] + (["-movflags", "+faststart"] if ext in (".mp4", ".mov") else [])
     else:
-        cmd += ["-vn", "-af", f"atempo={speed}"] + _AUDIO_ENC.get(path.suffix.lower(), [])
+        chain = []
+        if abs(speed - 1) >= 0.01:
+            if fx.get("pitch") == "keep":
+                chain.append(f"atempo={speed}")
+            else:  # "tape": pitch follows speed, the classic sped up / slowed sound
+                chain.append(f"aresample=48000,asetrate={round(48000 * speed)},aresample=48000")
+        if bass >= 0.1:
+            chain.append(f"bass=g={bass:.1f}:f=100:w=0.6")
+        chain = ",".join(chain) or "anull"
+        if reverb >= 0.01:
+            chain += "," + reverb_filter(reverb)
+        if reverb >= 0.01 or bass >= 0.1:
+            chain += ",alimiter=limit=0.95"
+        cmd += ["-vn", "-af", chain]
+        cmd += _AUDIO_ENC.get(path.suffix.lower(), [])
     cmd.append(str(out))
-    r = subprocess.run(cmd, capture_output=True, text=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-    if r.returncode != 0 or not out.exists():
-        raise RuntimeError("Editing failed: " + (r.stderr.strip()[-300:] or "ffmpeg error"))
+    proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    out_len = (float(duration) / speed) if duration else None
+    last = -1
+    for line in proc.stdout:  # "out_time_us=12345678" every ~0.5 s
+        if line.startswith("out_time_us=") and out_len and progress:
+            try:
+                pct = min(99, int(line.split("=", 1)[1]) / 1e6 / out_len * 100)
+            except ValueError:
+                continue
+            if int(pct) != last:
+                last = int(pct)
+                progress("editing", round(pct, 1))
+    err = proc.stderr.read()
+    proc.wait()
+    if proc.returncode != 0 or not out.exists():
+        raise RuntimeError("Editing failed: " + (err.strip()[-300:] or "ffmpeg error"))
     path.unlink(missing_ok=True)
     return out
 
@@ -572,9 +705,11 @@ def finish_track(audio_file, stem, out_dir, vlc_url, progress):
         audio_file.rename(named)
         audio_file = named
         try:
-            vlc_upload(audio_file, vlc_url, lambda pct: progress("sending", pct))
+            vlc_send_retrying(audio_file, vlc_url, progress)
             res["vlc"] = "sent"
             return res
+        except Cancelled:
+            raise
         except Exception as e:
             # Don't lose the download: fall back to saving it locally.
             log.warning("VLC send failed: %s", e)
@@ -591,6 +726,18 @@ def resolve_out_dir(msg):
     return Path(os.path.expandvars(os.path.expanduser(raw))) if raw else default_dir()
 
 
+def job_tmp(key):
+    """A temp folder named after the job: if the helper dies mid-download, the
+    restarted job finds the .part file and yt-dlp continues where it stopped."""
+    safe = re.sub(r"[^\w-]", "", str(key))[:60] or "x"
+    d = Path(tempfile.gettempdir()) / f"snagtune_{safe}"
+    d.mkdir(exist_ok=True)
+    for f in d.iterdir():  # keep only the partial download, not half-made outputs
+        if f.is_file() and not f.name.endswith((".part", ".ytdl")):
+            f.unlink(missing_ok=True)
+    return d
+
+
 def check_ffmpeg():
     if not (shutil.which("ffmpeg") and shutil.which("ffprobe")):
         raise RuntimeError("ffmpeg/ffprobe not found. Run install.ps1 again.")
@@ -599,23 +746,28 @@ def check_ffmpeg():
 def run_download(job_id, msg):
     fmt = msg.get("format", "best")  # best | mp3 | m4a | flac | opus
     meta = msg.get("meta") or {}
-    tmp = Path(tempfile.mkdtemp(prefix="snagtune_"))
+    tmp = job_tmp(job_id)
 
     def progress(stage, percent=None, **extra):
         send({"id": job_id, "type": "progress", "stage": stage, "percent": percent, **extra})
+    progress.cancelled = lambda: job_id in CANCELLED
 
     try:
         check_ffmpeg()
         progress("starting", 0)
         mode = msg.get("mode", "audio")
         audio_file, info = fetch_track(msg["url"], fmt, tmp, progress, job_id, mode=mode,
-                                       quality=msg.get("quality"), clip=msg.get("clip"), exact=msg.get("exact", True))
-        audio_file = apply_edits(audio_file, msg.get("speed", 1), msg.get("crop"), progress)
+                                       quality=msg.get("quality"), clip=msg.get("clip"), exact=msg.get("exact", True),
+                                       vformat=msg.get("vformat", "mp4"))
+        clip = msg.get("clip") or {}
+        length = (float(clip["end"]) - float(clip.get("start") or 0)) if clip.get("end") else info.get("duration")
+        audio_file = apply_edits(audio_file, msg.get("speed", 1), msg.get("crop"), progress, length, msg.get("fx"))
 
         progress("tagging", 100)
         cover = None
         try:
-            cover = load_cover(msg.get("cover"), msg.get("square_cover", True))
+            # a video keeps its thumbnail's own shape; music covers are squared
+            cover = load_cover(msg.get("cover"), msg.get("square_cover", True) and msg.get("mode") != "video")
         except Exception as e:
             log.warning("Cover failed: %s", e)
             progress("tagging", 100, warning=f"Cover art skipped: {e}")
@@ -774,8 +926,8 @@ def run_playlist(job_id, msg):
         if job_id in CANCELLED:
             cancelled = True
             break
-        tmp = Path(tempfile.mkdtemp(prefix="snagtune_"))
-        weights = {"starting": (0, 0), "downloading": (0, 0.8), "converting": (0.85, 0),
+        tmp = job_tmp(f"{job_id}_{item.get('index', k)}")
+        weights = {"starting": (0, 0), "downloading": (0, 0.8), "converting": (0.85, 0), "merging": (0.82, 0),
                    "tagging": (0.9, 0), "sending": (0.9, 0.1)}
 
         def progress(stage, percent=None, _k=k, _item=item, **extra):
@@ -792,7 +944,8 @@ def run_playlist(job_id, msg):
             for attempt in range(3):
                 try:
                     audio_file, info = fetch_track(item["url"], fmt, tmp, progress, job_id,
-                                                   mode=msg.get("mode", "audio"), quality=msg.get("quality"))
+                                                   mode=msg.get("mode", "audio"), quality=msg.get("quality"),
+                                                   vformat=msg.get("vformat", "mp4"))
                     rate_limited = 0
                     break
                 except Cancelled:
@@ -827,7 +980,7 @@ def run_playlist(job_id, msg):
             cover = None
             try:
                 spec = item.get("cover") or {"type": "url", "value": best_thumbnail(info)}
-                cover = load_cover(spec, item.get("square", msg.get("square_cover", True)))
+                cover = load_cover(spec, item.get("square", msg.get("square_cover", True)) and msg.get("mode") != "video")
             except Exception as e:
                 log.warning("Cover failed: %s", e)
             tag_file(audio_file, meta, cover)
@@ -984,6 +1137,31 @@ def vlc_upload(path, url, on_progress=None):
                            "Keep VLC's Sharing via Wi-Fi screen open.") from e
     finally:
         conn.close()
+
+
+def vlc_send_retrying(path, url, progress, tries=4, wait_for=120):
+    """Upload to VLC; when the connection drops (phone screen locked, Wi-Fi
+    hiccup) wait until VLC answers again and send the file again. VLC's upload
+    page can't continue a half-sent file, so a retry starts that file over."""
+    for attempt in range(1, tries + 1):
+        try:
+            return vlc_upload(path, url, lambda pct: progress("sending", pct))
+        except Exception as e:
+            if attempt == tries:
+                raise
+            log.info("VLC send attempt %d failed: %s", attempt, e)
+            deadline = time.time() + wait_for
+            while True:
+                progress("vlc_waiting", None)
+                time.sleep(3)
+                if progress.__dict__.get("cancelled", lambda: False)():
+                    raise Cancelled()
+                try:
+                    cmd_vlc_ping({"url": url})
+                    break
+                except Exception:
+                    if time.time() > deadline:
+                        raise e
 
 
 def cmd_vlc_send(msg):
@@ -1201,7 +1379,7 @@ COMMANDS = {"ping": cmd_ping, "info": cmd_info, "download": cmd_download,
             "playlist_info": cmd_playlist_info, "download_playlist": cmd_download_playlist, "cancel": cmd_cancel,
             "wallpaper": cmd_wallpaper, "sc_tracks": cmd_sc_tracks,
             "check_update": cmd_check_update, "installed_version": cmd_installed_version, "install_update": cmd_install_update,
-            "frame": cmd_frame}
+            "frame": cmd_frame, "audio_preview": cmd_audio_preview}
 
 
 def handle(msg):
@@ -1223,7 +1401,7 @@ def main():
         if msg is None:
             break
         # slow commands (network) must never block the reader loop
-        if msg.get("cmd") in ("info", "update", "vlc_ping", "vlc_send", "pick_folder", "playlist_info", "wallpaper", "sc_tracks", "check_update", "install_update", "frame"):
+        if msg.get("cmd") in ("info", "update", "vlc_ping", "vlc_send", "pick_folder", "playlist_info", "wallpaper", "sc_tracks", "check_update", "install_update", "frame", "audio_preview"):
             threading.Thread(target=handle, args=(msg,), daemon=True).start()
         else:
             handle(msg)

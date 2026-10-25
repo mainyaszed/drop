@@ -17,7 +17,7 @@ function connect() {
     port = null;
     for (const { reject } of pending.values()) reject(new Error(hostError(err)));
     pending.clear();
-    failRunningJobs(hostError(err));
+    resumeRunningJobs(hostError(err));
   });
   return port;
 }
@@ -60,6 +60,65 @@ function updateJob(id, patch) {
   return writeChain;
 }
 
+// The helper can die mid-download (PC sleep, antivirus, a crash, an update).
+// Start running jobs again, up to 3 times each: the helper keeps the partial
+// file, so the download continues where it stopped.
+const MAX_RESUMES = 3;
+const itemOffset = {}; // playlist job id -> tracks finished before the last resume
+
+async function resumeRunningJobs(error) {
+  const jobs = await getJobs();
+  const again = Object.entries(jobs).filter(([, j]) => j.status === "running" && j.request && (j.resumes || 0) < MAX_RESUMES);
+  for (const [id, j] of Object.entries(jobs)) {
+    if (j.status === "running" && !again.some(([x]) => x === id)) updateJob(id, { status: "error", error });
+  }
+  if (!again.length) return;
+  for (const [id, j] of again) updateJob(id, { stage: "resuming", percent: null, resumes: (j.resumes || 0) + 1 });
+  await new Promise((r) => setTimeout(r, 2000));
+  for (const [id, j] of again) {
+    let req = j.request;
+    if (j.kind === "playlist") {
+      // skip the tracks already saved; the one that was in progress starts again
+      const done = Math.max(0, (j.item || 1) - 1);
+      itemOffset[id] = done;
+      req = { ...req, entries: req.entries.slice(done) };
+    }
+    try {
+      connect().postMessage({ id, cmd: j.kind === "playlist" ? "download_playlist" : "download", ...req });
+    } catch (e) {
+      updateJob(id, { status: "error", error: hostError(e.message) });
+    }
+  }
+}
+
+// No internet: keep the job waiting (up to 15 min) and start it again once the
+// connection is back; the partial file is kept, so it continues.
+async function resumeWhenOnline(msg) {
+  const j = (await getJobs())[msg.id];
+  if (!j?.request || (j.offlineWaits || 0) >= 3) {
+    updateJob(msg.id, { status: "error", error: "No internet connection. Try again when you're back online." });
+    return setBadge();
+  }
+  updateJob(msg.id, { stage: "offline", percent: null, offlineWaits: (j.offlineWaits || 0) + 1 });
+  const until = Date.now() + 15 * 60 * 1000;
+  const online = async () => {
+    try { await fetch("https://www.google.com/generate_204", { mode: "no-cors", cache: "no-store" }); return true; } catch { return false; }
+  };
+  while (Date.now() < until) {
+    await new Promise((r) => setTimeout(r, 4000));
+    if ((await getJobs())[msg.id]?.status !== "running") return; // cancelled or cleared meanwhile
+    if (navigator.onLine && (await online())) {
+      updateJob(msg.id, { stage: "resuming" });
+      let req = j.request;
+      if (j.kind === "playlist") req = { ...req, entries: req.entries.slice(Math.max(0, (j.item || 1) - 1)) };
+      connect().postMessage({ id: msg.id, cmd: j.kind === "playlist" ? "download_playlist" : "download", ...req });
+      return;
+    }
+  }
+  updateJob(msg.id, { status: "error", error: "No internet connection. Try again when you're back online." });
+  setBadge();
+}
+
 async function failRunningJobs(error) {
   const jobs = await getJobs();
   for (const [id, j] of Object.entries(jobs)) {
@@ -78,7 +137,12 @@ function onHostMessage(msg) {
   if (msg.type === "progress") {
     const patch = { stage: msg.stage, percent: msg.percent, speed: msg.speed, eta: msg.eta };
     if (msg.warning) patch.warning = msg.warning;
-    if (msg.item) Object.assign(patch, { item: msg.item, total: msg.total, current: msg.current });
+    if (msg.item) {
+      const off = itemOffset[msg.id] || 0;
+      Object.assign(patch, { item: msg.item + off, current: msg.current });
+      if (off) patch.percent = null; // the helper's % covers only the remaining tracks
+      else patch.total = msg.total;
+    }
     updateJob(msg.id, patch);
   } else if (msg.type === "done") {
     updateJob(msg.id, {
@@ -87,6 +151,8 @@ function onHostMessage(msg) {
       summary: msg.playlist || null, skipped: msg.skipped_list || null, failed: msg.failed || null,
     });
     setBadge();
+  } else if (msg.type === "error" && !msg.cancelled && /getaddrinfo|Failed to resolve|Name or service not known|Network is unreachable|No internet|ERR_INTERNET_DISCONNECTED|nodename nor servname/i.test(msg.error || "")) {
+    resumeWhenOnline(msg);
   } else if (msg.type === "error") {
     updateJob(msg.id, { status: "error", error: msg.error, cancelled: !!msg.cancelled, summary: msg.playlist || null, failed: msg.failed || null });
     setBadge();
@@ -103,6 +169,7 @@ async function startDownload(req) {
     title: req.meta.title,
     artist: req.meta.artist,
     format: req.format,
+    request: req, // kept so the job can restart if the helper dies
   });
   setBadge();
   connect().postMessage({ id, cmd: "download", ...req });
@@ -238,6 +305,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         return startUpdate(msg.url, msg.version, false);
       case "scTracks":
         return call("sc_tracks", { ids: msg.ids, urls: msg.urls });
+      case "audioPreview":
+        return call("audio_preview", { url: msg.url, t: msg.t });
       case "frame":
         return call("frame", { url: msg.url, t: msg.t });
       case "wallpaper":

@@ -19,6 +19,12 @@
     </button>
   </header>
 
+  <!-- no internet: shown while the PC is offline -->
+  <div id="offlineBar" class="offline-bar glass" hidden>
+    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M2 8.8a15 15 0 0 1 20 0M5.2 12.2a10 10 0 0 1 13.6 0M8.5 15.6a5 5 0 0 1 7 0"/><circle cx="12" cy="19" r="1.2" fill="currentColor"/><path d="M3 3l18 18"/></svg>
+    <span><b>No internet connection</b><small>Drop will pick up where it left off once you're back online.</small></span>
+  </div>
+
   <!-- new version on GitHub -->
   <div id="updateBar" class="update-bar glass" hidden>
     <span id="updateText"></span>
@@ -146,7 +152,8 @@
         <div class="top-fields">
           <div class="source-line"><span id="sourceBadge" class="badge"></span><span id="audioInfo" class="muted small"></span></div>
           <label>Title <input id="fTitle" required /></label>
-          <label>Artist <input id="fArtist" /></label>
+          <label><span id="fArtistLabel">Artist</span> <input id="fArtist" /></label>
+          <div id="videoInfo" class="video-info" hidden></div>
         </div>
       </div>
 
@@ -195,6 +202,11 @@
           <button type="button" data-format="mp3" class="seg">MP3</button>
           <button type="button" data-format="m4a" class="seg">M4A</button>
           <button type="button" data-format="flac" class="seg">FLAC</button>
+        </div>
+        <div class="formats vfmt" role="radiogroup" aria-label="Video format" hidden>
+          <button type="button" data-vformat="mp4" class="seg" title="Plays everywhere">MP4</button>
+          <button type="button" data-vformat="mkv" class="seg" title="Any codec, keeps the original streams">MKV</button>
+          <button type="button" data-vformat="webm" class="seg" title="VP9/AV1 + Opus: great for the web">WebM</button>
         </div>
         <button id="downloadBtn" class="primary big">Download</button>
         <button type="button" id="vlcBtn" class="vlc-btn" disabled aria-label="Download and send to VLC"
@@ -289,11 +301,12 @@
 
   <!-- clip / speed / crop editor -->
   <div id="clipEditor" class="editor" hidden>
-    <div class="editor-panel glass dense clip-panel" role="dialog" aria-label="Edit clip">
-      <div class="editor-head">
-        <h2>Edit</h2>
-        <button type="button" id="clipClose" class="icon-btn" aria-label="Close">×</button>
+    <div class="editor-panel glass card clip-panel" aria-label="Edit clip">
+      <div class="page-head">
+        <button type="button" id="clipClose" class="back-btn">‹ Back</button>
+        <h2>Edit video</h2>
       </div>
+      <div class="page-body">
       <div class="clip-stage" id="clipStage">
         <img id="clipFrame" alt="" />
         <div id="cropBox" class="crop-box" hidden></div>
@@ -301,15 +314,23 @@
         <span id="clipWhich" class="clip-which">Start</span>
       </div>
       <div class="range2" id="clipRange">
+        <div class="strip-dim" id="clipDimL"></div>
+        <div class="strip-dim" id="clipDimR"></div>
         <div class="range2-fill" id="clipFill"></div>
         <input type="range" id="clipStart" min="0" step="0.1" aria-label="Start" />
         <input type="range" id="clipEnd" min="0" step="0.1" aria-label="End" />
       </div>
       <div class="clip-times">
-        <label>Start <input id="clipStartT" spellcheck="false" /></label>
-        <span id="clipLen" class="muted small"></span>
-        <label>End <input id="clipEndT" spellcheck="false" /></label>
+        <label>Start <button type="button" id="clipNowStart" class="link now-btn" title="Use the time the video is at in the tab">⏱ Now</button><input id="clipStartT" spellcheck="false" /></label>
+        <div class="nudge" role="group" aria-label="Fine-tune the selected handle">
+          <button type="button" data-nudge="-1" title="Back 1 s (Shift+←)">−1s</button>
+          <button type="button" data-nudge="-0.1" title="Back 0.1 s (←)">−.1</button>
+          <button type="button" data-nudge="0.1" title="Forward 0.1 s (→)">+.1</button>
+          <button type="button" data-nudge="1" title="Forward 1 s (Shift+→)">+1s</button>
+        </div>
+        <label>End <button type="button" id="clipNowEnd" class="link now-btn" title="Use the time the video is at in the tab">⏱ Now</button><input id="clipEndT" spellcheck="false" /></label>
       </div>
+      <div class="clip-out"><span>Output</span><b id="clipLen"></b></div>
       <span class="setting-label">Speed</span>
       <div class="formats speed-seg">
         <button type="button" class="seg" data-speed="0.5">0.5×</button>
@@ -328,11 +349,63 @@
           <button type="button" class="seg" data-crop="1.7778">16:9</button>
           <button type="button" class="seg" data-crop="0.8">4:5</button>
         </div>
-        <label class="check fast-cut" title="Cuts on the nearest keyframe: much faster, but can be up to a few seconds off"><input type="checkbox" id="clipFast" /> Fast cut (less exact)</label>
       </div>
       <div class="row">
         <button type="button" id="clipReset" class="secondary">Reset</button>
-        <button type="button" id="clipApply" class="primary">Apply</button>
+        <button type="button" id="clipApply" class="primary">Done</button>
+      </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- audio effects: speed, reverb, bass, with a live preview -->
+  <div id="fxEditor" class="editor" hidden>
+    <div class="editor-panel glass card fx-panel" aria-label="Audio effects">
+      <div class="page-head">
+        <button type="button" id="fxClose" class="back-btn">‹ Back</button>
+        <h2>Effects</h2>
+      </div>
+      <div class="page-body">
+      <div class="fx-player" id="fxPlayer">
+        <img class="fx-bg" id="fxBg" alt="" />
+        <canvas id="fxViz" width="680" height="120"></canvas>
+        <div class="fx-art"><img id="fxCover" alt="" /></div>
+        <div class="fx-meta"><b id="fxTitle"></b><span id="fxArtist"></span></div>
+        <div class="fx-progress"><span id="fxProg"></span></div>
+        <div class="fx-times"><span id="fxCur">0:00</span><span id="fxStatus">Preview</span><span id="fxDur">0:30</span></div>
+        <button type="button" id="fxPlay" class="fx-play" aria-label="Play preview">
+          <svg class="i-play" viewBox="0 0 24 24" width="30" height="30"><path fill="currentColor" d="M7 4.8v14.4c0 .8.9 1.3 1.6.9l11.5-7.2c.6-.4.6-1.4 0-1.8L8.6 3.9C7.9 3.5 7 4 7 4.8z"/></svg>
+          <svg class="i-pause" viewBox="0 0 24 24" width="30" height="30"><rect fill="currentColor" x="6" y="4.5" width="4" height="15" rx="1.2"/><rect fill="currentColor" x="14" y="4.5" width="4" height="15" rx="1.2"/></svg>
+        </button>
+      </div>
+      <div class="fx-presets" id="fxPresets">
+        <button type="button" data-preset="original">Original</button>
+        <button type="button" data-preset="slowed">Slowed + Reverb</button>
+        <button type="button" data-preset="sped">Sped up</button>
+        <button type="button" data-preset="nightcore">Nightcore</button>
+        <button type="button" data-preset="daycore">Daycore</button>
+      </div>
+      <div class="fx-row-head"><span class="setting-label">Speed</span><b id="fxSpeedVal" class="fx-val">1.00×</b></div>
+      <div class="fx-speed">
+        <button type="button" class="fx-step" data-step="-0.01" aria-label="Slower">−</button>
+        <div class="fx-slider">
+          <input type="range" id="fxSpeed" min="0.5" max="2" step="0.01" value="1" aria-label="Speed" />
+          <div class="fx-ticks"><i style="left:0%">0.5</i><i style="left:16.67%">0.75</i><i style="left:33.33%">1</i><i style="left:50%">1.25</i><i style="left:66.67%">1.5</i><i style="left:100%">2</i></div>
+        </div>
+        <button type="button" class="fx-step" data-step="0.01" aria-label="Faster">+</button>
+      </div>
+      <div class="formats fx-pitch">
+        <button type="button" class="seg" data-pitch="tape" title="Pitch goes up and down with the speed: the classic sped up / slowed sound">Pitch follows speed</button>
+        <button type="button" class="seg" data-pitch="keep" title="Only the tempo changes">Keep pitch</button>
+      </div>
+      <div class="fx-row-head"><span class="setting-label">Reverb</span><b id="fxReverbVal" class="fx-val">0%</b></div>
+      <input type="range" id="fxReverb" class="fx-range" min="0" max="100" step="1" value="0" aria-label="Reverb" />
+      <div class="fx-row-head"><span class="setting-label">Bass boost</span><b id="fxBassVal" class="fx-val">0 dB</b></div>
+      <input type="range" id="fxBass" class="fx-range" min="0" max="12" step="0.5" value="0" aria-label="Bass boost" />
+      <div class="row">
+        <button type="button" id="fxReset" class="secondary">Reset</button>
+        <button type="button" id="fxApply" class="primary">Done</button>
+      </div>
       </div>
     </div>
   </div>

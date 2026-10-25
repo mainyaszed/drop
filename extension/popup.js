@@ -30,7 +30,9 @@ const state = {
   plUrl: null, // the playlist on this page, if any
   playlist: null, // playlist_info result for plUrl
   media: "audio", // "audio" | "video"
+  fx: null, // audio effects: {speed, pitch, reverb, bass, preset} or null
   quality: "best", // video: "best" or a height like "1080"
+  vformat: "mp4", // video container: mp4 | mkv | webm
   clip: null, // {start, end, speed, crop, exact} from the editor, or null
   plMedia: "audio",
   plQuality: "best",
@@ -53,7 +55,15 @@ function show(id, on = true) {
   $(id).hidden = !on;
 }
 
+const OFFLINE_RE = /getaddrinfo|Failed to resolve|Name or service not known|Network is unreachable|No internet|ERR_INTERNET_DISCONNECTED|nodename nor servname/i;
+const isOffline = (msg) => !navigator.onLine || OFFLINE_RE.test(msg || "");
+
 function showError(msg) {
+  if (msg && isOffline(msg)) {
+    // a DNS/network error means no internet: say that, not the raw yt-dlp text
+    showOffline(true);
+    msg = "No internet connection. Check your Wi-Fi, Drop will retry by itself.";
+  }
   $("#errorBox").textContent = msg;
   show("#errorBox", !!msg);
 }
@@ -153,7 +163,7 @@ function filenameFromPattern() {
 }
 
 function extFor(format) {
-  if (state.media === "video") return "mp4";
+  if (state.media === "video") return state.vformat;
   return format === "best" ? state.info?.best_ext || "opus" : format;
 }
 
@@ -172,6 +182,13 @@ async function saveDraft() {
     coverData: state.coverData,
     coverLink: state.coverLink,
     square: $("#squareCrop").checked,
+    media: state.media,
+    quality: state.quality,
+    vformat: state.vformat,
+    clip: state.clip,
+    fx: state.fx,
+    // the edit window, if it was open: come back exactly where you left off
+    editor: $("#clipEditor").hidden ? null : { start: ce.start, end: ce.end, speed: ce.speed, aspect: ce.aspect, box: ce.box, which: ce.which },
   };
   await chrome.storage.session.set({ [`draft:${state.url}`]: draft });
 }
@@ -502,11 +519,21 @@ function fillForm(info, draft) {
   const mode = { upload: "custom", url: "custom" }[draft?.coverMode] || draft?.coverMode || "thumb";
   setCoverMode(mode === "custom" && !state.coverData && !state.coverLink ? "thumb" : mode);
   $("#fFilename").value = state.filenameEdited ? draft.filename : filenameFromPattern();
-  state.clip = null;
+  state.clip = draft?.clip || null;
+  state.fx = draft?.fx || null;
+  fxStop(true);
+  if (draft?.quality) state.quality = draft.quality;
+  if (draft?.vformat) state.vformat = draft.vformat;
   ce.frames = {};
   renderQualities();
-  $(".mode-seg .seg[data-mode=video]").disabled = !info.has_video;
-  setMedia(state.editIdx != null ? "audio" : state.media);
+  $(".mode-seg").hidden = !info.has_video;
+  setMedia(state.editIdx != null ? "audio" : draft?.media || state.media);
+  if (draft?.editor && state.editIdx == null) {
+    openClipEditor();
+    Object.assign(ce, draft.editor);
+    syncClipUI();
+    loadFrame();
+  }
 }
 
 async function download(e, toVlc = false) {
@@ -1022,27 +1049,68 @@ const parseT = (v) => {
 };
 
 function mediaRequest() {
-  const req = { mode: state.media, quality: state.quality };
+  const req = { mode: state.media, quality: state.quality, vformat: state.vformat };
+  if (state.media === "audio") {
+    const f = state.fx;
+    if (f) Object.assign(req, { speed: f.speed, fx: { pitch: f.pitch, reverb: f.reverb / 100, bass: f.bass } });
+    return req;
+  }
   const c = state.clip;
   if (c) {
     const dur = state.info?.duration || 0;
     if (c.start > 0.05 || (dur && c.end < dur - 0.05)) req.clip = { start: c.start, end: c.end };
-    req.exact = !c.fast;
     if (c.speed !== 1) req.speed = c.speed;
     if (c.crop && state.media === "video") req.crop = c.crop;
   }
   return req;
 }
 
-function setMedia(mode) {
+// ------------------------------------------------------------ offline --
+function showOffline(on) {
+  show("#offlineBar", on);
+}
+
+function watchConnection() {
+  showOffline(!navigator.onLine);
+  addEventListener("offline", () => showOffline(true));
+  addEventListener("online", () => {
+    showOffline(false);
+    // the page failed while offline: try it again
+    if (!$("#errorBox").hidden && /No internet/.test($("#errorBox").textContent)) {
+      showError("");
+      if (state.url) loadTrack(state.url);
+      else if (state.plUrl) loadPlaylist(state.plUrl);
+    }
+  });
+}
+
+function renderVideoInfo() {
+  const i = state.info || {};
+  const chips = [];
+  if (i.height) chips.push(i.height >= 2160 ? "4K" : `${i.height}p`);
+  if (i.fps) chips.push(`${Math.round(i.fps)} fps`);
+  if (i.vcodec) chips.push({ avc1: "H.264", vp09: "VP9", vp9: "VP9", av01: "AV1" }[i.vcodec] || i.vcodec.toUpperCase());
+  if (i.duration) chips.push(fmtT(i.duration).replace(/\.\d$/, ""));
+  if (i.upload_date) chips.push(`${i.upload_date.slice(6, 8)}/${i.upload_date.slice(4, 6)}/${i.upload_date.slice(0, 4)}`);
+  if (i.views) chips.push(`${Intl.NumberFormat("en", { notation: "compact" }).format(i.views)} views`);
+  $("#videoInfo").replaceChildren(...chips.map((t) => Object.assign(document.createElement("span"), { textContent: t })));
+}
+
+function setMedia(mode, save = false) {
   if (mode === "video" && state.info && !state.info.has_video) mode = "audio";
   state.media = mode;
   $$(".mode-seg .seg").forEach((b) => b.classList.toggle("active", b.dataset.mode === mode));
   $("#trackForm").classList.toggle("video", mode === "video");
+  // in a video the artist is the channel; both get written into the file
+  $("#fArtistLabel").textContent = mode === "video" ? "Channel" : "Artist";
+  show("#videoInfo", mode === "video");
+  if (mode === "video") renderVideoInfo();
   show("#qualityRow", mode === "video");
-  $$("#trackActions .formats").forEach((f) => (f.hidden = mode === "video"));
+  $$("#trackActions .formats").forEach((f) => (f.hidden = f.classList.contains("vfmt") ? mode !== "video" : mode === "video"));
+  $$(".vfmt .seg").forEach((b) => b.classList.toggle("active", b.dataset.vformat === state.vformat));
   $("#fExt").textContent = "." + extFor(state.format);
   renderEditSummary();
+  if (save) saveDraft();
 }
 
 function renderQualities() {
@@ -1057,14 +1125,17 @@ function renderQualities() {
     b.textContent = text;
     if (tag) { const s = document.createElement("small"); s.textContent = tag; b.append(s); }
     b.title = v === "best" ? "The highest quality this video has" : v >= 1440 ? "VP9/AV1 video (YouTube has no H.264 above 1080p)" : "H.264 MP4: plays everywhere";
-    b.onclick = () => { state.quality = v; renderQualities(); };
+    b.onclick = () => { state.quality = v; renderQualities(); saveDraft(); };
     return b;
   }));
 }
 
 function renderEditSummary() {
-  const c = state.clip;
+  const c = state.media === "video" ? state.clip : null;
   const parts = [];
+  if (state.media === "audio") $("#clipBtn").textContent = "🎚 Effects";
+  else $("#clipBtn").textContent = "✂ Edit";
+  if (state.media === "audio" && state.fx) parts.push(fxSummary(state.fx));
   if (c) {
     const dur = state.info?.duration || 0;
     if (c.start > 0.05 || (dur && c.end < dur - 0.05)) parts.push(`✂ ${fmtT(c.start)}–${fmtT(c.end)}`);
@@ -1082,21 +1153,29 @@ const ce = { start: 0, end: 0, speed: 1, aspect: "", which: "start", box: null, 
 async function openClipEditor() {
   if (!state.info) return;
   const dur = state.info.duration || 0;
-  const c = state.clip || { start: 0, end: dur, speed: 1, crop: null, aspect: "", fast: false };
+  const c = state.clip || { start: 0, end: dur, speed: 1, crop: null, aspect: "" };
   Object.assign(ce, { start: c.start, end: c.end || dur, speed: c.speed, aspect: c.aspect || "", which: "start", box: c.crop ? { ...c.crop } : null });
   for (const id of ["#clipStart", "#clipEnd"]) { $(id).max = dur; }
-  $("#clipFast").checked = !!c.fast;
   const video = state.media === "video";
   show("#cropControls", video);
   show("#clipEditor");
-  document.body.classList.add("editing");
+  show("#main", false);
   syncClipUI();
-  if (video) loadFrame();
-  else { $("#clipFrame").src = coverSrc() || state.info.thumbnail || ""; show("#cropBox", false); $("#clipWhich").textContent = "Audio"; }
+  if (video) {
+    // nothing heavy on open: the thumbnail, and real frames only once a handle moves
+    $("#clipFrame").src = state.info.thumbnail || "";
+    $("#clipWhich").textContent = "Move a handle to see that frame";
+    show("#clipMsg", false);
+  }
+  else {
+    $("#clipFrame").src = coverSrc() || state.info.thumbnail || ""; show("#cropBox", false); $("#clipWhich").textContent = "Audio"; }
 }
 
 function closeClipEditor() {
+  if (!$("#clipEditor").hidden) applyClip();
   show("#clipEditor", false);
+  show("#main");
+  saveDraft();
   if ($("#editor").hidden && $("#whatsNew").hidden) document.body.classList.remove("editing");
 }
 
@@ -1105,12 +1184,49 @@ function syncClipUI() {
   $("#clipStart").value = ce.start; $("#clipEnd").value = ce.end;
   $("#clipStartT").value = fmtT(ce.start); $("#clipEndT").value = fmtT(ce.end);
   const len = (ce.end - ce.start) / ce.speed;
-  $("#clipLen").textContent = `${fmtT(len)} long`;
-  $("#clipFill").style.left = `${(ce.start / dur) * 100}%`;
-  $("#clipFill").style.width = `${((ce.end - ce.start) / dur) * 100}%`;
+  const pct = (t) => (t / dur) * 100;
+  $("#clipFill").style.left = `${pct(ce.start)}%`;
+  $("#clipFill").style.width = `${pct(ce.end - ce.start)}%`;
+  $("#clipDimL").style.width = `${pct(ce.start)}%`;
+  $("#clipDimR").style.width = `${100 - pct(ce.end)}%`;
+  $("#clipStart").classList.toggle("on", ce.which === "start");
+  $("#clipEnd").classList.toggle("on", ce.which === "end");
+  $("#clipStartT").parentElement.classList.toggle("on", ce.which === "start");
+  $("#clipEndT").parentElement.classList.toggle("on", ce.which === "end");
+  $("#clipLen").textContent = outputSummary(len);
   $$(".speed-seg .seg").forEach((b) => b.classList.toggle("active", Number(b.dataset.speed) === ce.speed));
   $$(".crop-seg .seg").forEach((b) => b.classList.toggle("active", b.dataset.crop === ce.aspect));
   placeCropBox();
+  clearTimeout(ce.saveTimer);
+  ce.saveTimer = setTimeout(saveDraft, 300);
+}
+
+// "2:14.5 · 1080×1080 · 1.5×": what the saved file will be
+function outputSummary(len) {
+  const parts = [fmtT(len)];
+  if (state.media === "video") {
+    const vw = state.info.width || 0, vh = state.info.height || 0;
+    if (vw && vh) {
+      const cap = state.quality === "best" ? vh : Math.min(vh, Number(state.quality));
+      const scale = cap / vh;
+      const b = ce.box || { w: 1, h: 1 };
+      const even = (n) => Math.max(2, Math.floor(n / 2) * 2);
+      parts.push(`${even(vw * scale * b.w)}×${even(vh * scale * b.h)}`);
+    }
+  }
+  if (ce.speed !== 1) parts.push(`${ce.speed}×`);
+  parts.push(extFor(state.format).toUpperCase());
+  return parts.join(" · ");
+}
+
+function nudge(d) {
+  const dur = state.info.duration || 0, minLen = 0.5;
+  if (ce.which === "end") ce.end = Math.min(dur, Math.max(ce.start + minLen, ce.end + d));
+  else ce.start = Math.max(0, Math.min(ce.end - minLen, ce.start + d));
+  ce.start = Math.round(ce.start * 10) / 10;
+  ce.end = Math.round(ce.end * 10) / 10;
+  syncClipUI();
+  loadFrame();
 }
 
 // show the exact frame at the handle that last moved (fetched by the helper)
@@ -1162,13 +1278,38 @@ function placeCropBox() {
   box.hidden = false;
 }
 
+function applyClip() {
+  const names = { "1": "1:1", "0.5625": "9:16", "1.7778": "16:9", "0.8": "4:5" };
+  state.clip = {
+    start: ce.start, end: ce.end, speed: ce.speed,
+    aspect: ce.aspect, crop: ce.box ? { ...ce.box } : null, cropName: names[ce.aspect] || "",
+  };
+  renderEditSummary();
+}
+
 function setupClipEditor() {
-  $("#clipBtn").onclick = openClipEditor;
+  $("#clipBtn").onclick = () => (state.media === "audio" ? openFx() : openClipEditor());
+  setupFx();
   $("#clipClose").onclick = closeClipEditor;
   $("#clipEditor").onclick = (e) => { if (e.target.id === "clipEditor") closeClipEditor(); };
   document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("#clipEditor").hidden) closeClipEditor(); });
-  $$(".mode-seg .seg").forEach((b) => (b.onclick = () => setMedia(b.dataset.mode)));
-  $("#editClear").onclick = () => { state.clip = null; renderEditSummary(); };
+  $$(".mode-seg .seg").forEach((b) => (b.onclick = () => setMedia(b.dataset.mode, true)));
+  $$(".vfmt .seg").forEach((b) => (b.onclick = () => { state.vformat = b.dataset.vformat; setMedia("video", true); }));
+  $("#editClear").onclick = () => { if (state.media === "audio") state.fx = null; else state.clip = null; renderEditSummary(); saveDraft(); };
+  // take the time the video is paused at in the tab
+  const nowBtn = (which) => async (e) => {
+    e.preventDefault();
+    try {
+      const [{ result: t }] = await chrome.scripting.executeScript({
+        target: { tabId: state.tabId }, func: () => document.querySelector("video")?.currentTime ?? null,
+      });
+      if (t == null) throw 0;
+      typed(which)({ target: { value: fmtT(t) } });
+    } catch {
+      $("#clipMsg").textContent = "Couldn't read the video's time. Open Drop on the video's tab.";
+      show("#clipMsg");
+    }
+  };
 
   const minLen = 0.5;
   $("#clipStart").oninput = (e) => { ce.start = Math.min(Number(e.target.value), ce.end - minLen); ce.which = "start"; syncClipUI(); loadFrame(); };
@@ -1180,6 +1321,18 @@ function setupClipEditor() {
     else ce.end = Math.max(Math.min(dur, v), ce.start + minLen);
     ce.which = which; syncClipUI(); loadFrame();
   };
+  $$(".nudge button").forEach((b) => (b.onclick = () => nudge(Number(b.dataset.nudge))));
+  $("#clipStartT").onfocus = () => { ce.which = "start"; syncClipUI(); loadFrame(); };
+  $("#clipEndT").onfocus = () => { ce.which = "end"; syncClipUI(); loadFrame(); };
+  document.addEventListener("keydown", (e) => {
+    if ($("#clipEditor").hidden || e.target.matches?.("input:not([type=range])")) return;
+    if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+      e.preventDefault();
+      nudge((e.key === "ArrowLeft" ? -1 : 1) * (e.shiftKey ? 1 : 0.1));
+    }
+  });
+  $("#clipNowStart").onclick = nowBtn("start");
+  $("#clipNowEnd").onclick = nowBtn("end");
   $("#clipStartT").onchange = typed("start");
   $("#clipEndT").onchange = typed("end");
   $$(".speed-seg .seg").forEach((b) => (b.onclick = () => { ce.speed = Number(b.dataset.speed); syncClipUI(); }));
@@ -1202,18 +1355,9 @@ function setupClipEditor() {
 
   $("#clipReset").onclick = () => {
     Object.assign(ce, { start: 0, end: state.info.duration || 0, speed: 1, aspect: "", box: null, which: "start" });
-    $("#clipFast").checked = false;
     syncClipUI(); loadFrame();
   };
-  $("#clipApply").onclick = () => {
-    const names = { "1": "1:1", "0.5625": "9:16", "1.7778": "16:9", "0.8": "4:5" };
-    state.clip = {
-      start: ce.start, end: ce.end, speed: ce.speed, fast: $("#clipFast").checked,
-      aspect: ce.aspect, crop: ce.box ? { ...ce.box } : null, cropName: names[ce.aspect] || "",
-    };
-    closeClipEditor();
-    renderEditSummary();
-  };
+  $("#clipApply").onclick = closeClipEditor;
 
   // playlists: audio or video, and a quality
   const plMode = (m) => {
@@ -1228,11 +1372,220 @@ function setupClipEditor() {
   plMode("audio"); plQ("best");
 }
 
+// ----------------------------------------------------------- audio effects --
+// Preview: the helper sends 30 s of the song once; Web Audio plays it with the
+// effects applied live. The download gets the same effects from ffmpeg.
+
+const FX_PRESETS = {
+  original: { speed: 1, pitch: "tape", reverb: 0, bass: 0 },
+  slowed: { speed: 0.85, pitch: "tape", reverb: 45, bass: 3 },
+  sped: { speed: 1.25, pitch: "tape", reverb: 0, bass: 0 },
+  nightcore: { speed: 1.3, pitch: "tape", reverb: 8, bass: 2 },
+  daycore: { speed: 0.8, pitch: "tape", reverb: 20, bass: 4 },
+};
+const FX_NAMES = { slowed: "Slowed + Reverb", sped: "Sped up", nightcore: "Nightcore", daycore: "Daycore" };
+const fxs = { cur: { ...FX_PRESETS.original }, audio: null, ctx: null, nodes: null, raf: 0, url: null, loading: false, bars: [] };
+
+function fxSummary(f) {
+  const bits = [];
+  const name = FX_NAMES[f.preset];
+  if (name) bits.push(name);
+  if (f.speed !== 1) bits.push(`${f.speed.toFixed(2)}×`);
+  if (f.reverb) bits.push(`reverb ${f.reverb}%`);
+  if (f.bass) bits.push(`bass +${f.bass} dB`);
+  return "🎚 " + (bits.join(" · ") || "Original");
+}
+
+function fxIsOriginal(f) { return f.speed === 1 && !f.reverb && !f.bass; }
+
+function openFx() {
+  if (!state.info) return;
+  fxs.cur = { ...(state.fx || FX_PRESETS.original) };
+  const art = coverSrc() || state.info.thumbnail || "";
+  $("#fxCover").src = art;
+  $("#fxBg").src = art;
+  $("#fxTitle").textContent = $("#fTitle").value || state.info.title || "";
+  $("#fxArtist").textContent = $("#fArtist").value || state.info.uploader || "";
+  show("#fxEditor");
+  show("#main", false);
+  fxSync();
+}
+
+function closeFx() {
+  if (!$("#fxEditor").hidden) applyFx(); // Back keeps what you set, like Settings
+  fxStop();
+  show("#fxEditor", false);
+  show("#main");
+  if ($("#editor").hidden && $("#whatsNew").hidden && $("#clipEditor").hidden) document.body.classList.remove("editing");
+}
+
+function fxPresetOf(f) {
+  return Object.keys(FX_PRESETS).find((k) => {
+    const p = FX_PRESETS[k];
+    return p.speed === f.speed && p.pitch === f.pitch && p.reverb === f.reverb && p.bass === f.bass;
+  }) || "";
+}
+
+function fxSync(bump) {
+  const f = fxs.cur;
+  f.preset = fxPresetOf(f);
+  const setRange = (id, v, min, max) => { const el = $(id); el.value = v; el.style.setProperty("--p", `${((v - min) / (max - min)) * 100}%`); };
+  setRange("#fxSpeed", f.speed, 0.5, 2);
+  setRange("#fxReverb", f.reverb, 0, 100);
+  setRange("#fxBass", f.bass, 0, 12);
+  $("#fxSpeedVal").textContent = `${f.speed.toFixed(2)}×`;
+  $("#fxReverbVal").textContent = `${f.reverb}%`;
+  $("#fxBassVal").textContent = `${f.bass ? "+" : ""}${f.bass} dB`;
+  if (bump) { const el = $(bump); el.classList.remove("bump"); void el.offsetWidth; el.classList.add("bump"); setTimeout(() => el.classList.remove("bump"), 160); }
+  $$("#fxPresets button").forEach((b) => b.classList.toggle("active", b.dataset.preset === f.preset));
+  $$(".fx-pitch .seg").forEach((b) => b.classList.toggle("active", b.dataset.pitch === f.pitch));
+  fxApplyLive();
+}
+
+// reverb = a dozen fading echoes, exactly the taps the helper uses for the download
+const REVERB_TAPS = [37, 61, 89, 127, 173, 229, 293, 367, 449, 541, 643, 757];
+function fxImpulse(ctx) {
+  const buf = ctx.createBuffer(2, Math.ceil(0.8 * ctx.sampleRate), ctx.sampleRate);
+  for (let c = 0; c < 2; c++) {
+    const d = buf.getChannelData(c);
+    REVERB_TAPS.forEach((ms, k) => { d[Math.round((ms / 1000) * ctx.sampleRate)] = 0.55 * Math.exp(-k * 0.28); });
+  }
+  return buf;
+}
+const reverbOut = (amount) => 1 / (1 + REVERB_TAPS.reduce((s, _, k) => s + amount * 0.55 * Math.exp(-k * 0.28), 0) * 0.5);
+
+function fxApplyLive() {
+  const a = fxs.audio, f = fxs.cur;
+  if (!a) return;
+  a.preservesPitch = f.pitch === "keep";
+  a.playbackRate = f.speed;
+  if (!fxs.nodes) return;
+  const t = fxs.ctx.currentTime;
+  fxs.nodes.bass.gain.setTargetAtTime(f.bass, t, 0.05);
+  fxs.nodes.wet.gain.setTargetAtTime(f.reverb / 100, t, 0.05);
+  fxs.nodes.out.gain.setTargetAtTime(reverbOut(f.reverb / 100), t, 0.05);
+}
+
+async function fxPlay() {
+  const player = $("#fxPlayer");
+  if (fxs.audio && !fxs.audio.paused) { fxs.audio.pause(); return; }
+  if (!fxs.audio || fxs.url !== state.url) {
+    if (fxs.loading) return;
+    fxs.loading = true;
+    player.classList.add("loading");
+    $("#fxStatus").textContent = "Loading…";
+    try {
+      const dur = state.info.duration || 0;
+      const r = await bg("audioPreview", { url: state.url, t: dur > 60 ? Math.round(dur * 0.3) : 0 });
+      fxs.audio = new Audio(r.data);
+      fxs.url = state.url;
+      fxs.audio.loop = true;
+      fxs.ctx = fxs.ctx || new AudioContext();
+      const ctx = fxs.ctx;
+      const src = ctx.createMediaElementSource(fxs.audio);
+      const bass = ctx.createBiquadFilter();
+      bass.type = "lowshelf"; bass.frequency.value = 100;
+      const dry = ctx.createGain();
+      const conv = ctx.createConvolver();
+      conv.normalize = false;
+      conv.buffer = fxImpulse(ctx);
+      const wet = ctx.createGain();
+      const sum = ctx.createDynamicsCompressor(); // keeps reverb + bass from clipping
+      sum.threshold.value = -3; sum.ratio.value = 8;
+      const out = ctx.createGain();
+      const an = ctx.createAnalyser();
+      an.fftSize = 256; an.smoothingTimeConstant = 0.8;
+      src.connect(bass); bass.connect(dry); bass.connect(conv); conv.connect(wet);
+      dry.connect(sum); wet.connect(sum); sum.connect(out); out.connect(an); an.connect(ctx.destination);
+      fxs.nodes = { bass, wet, out, an };
+      fxs.audio.ontimeupdate = () => {
+        const a = fxs.audio, m = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+        $("#fxProg").style.width = `${(a.currentTime / (a.duration || 30)) * 100}%`;
+        $("#fxCur").textContent = m(a.currentTime);
+        $("#fxDur").textContent = m(a.duration || 30);
+      };
+      fxs.audio.onplay = () => { player.classList.add("playing"); $("#fxStatus").textContent = "Preview"; fxDraw(); };
+      fxs.audio.onpause = () => { player.classList.remove("playing"); $("#fxStatus").textContent = "Paused"; };
+    } catch (e) {
+      $("#fxStatus").textContent = /Unknown message/.test(e.message) ? "Reload Drop once to use the preview."
+        : isOffline(e.message) ? "No internet connection" : "Preview unavailable";
+      if (isOffline(e.message)) showOffline(true);
+      return;
+    } finally {
+      fxs.loading = false;
+      player.classList.remove("loading");
+    }
+  }
+  fxApplyLive();
+  await fxs.ctx.resume();
+  fxs.audio.play();
+}
+
+function fxStop(forget = false) {
+  if (fxs.audio) fxs.audio.pause();
+  if (forget) { fxs.audio = null; fxs.url = null; fxs.nodes = null; }
+}
+
+// spectrum: mirrored rounded bars that ease down when paused
+function fxDraw() {
+  cancelAnimationFrame(fxs.raf);
+  const cv = $("#fxViz"), g = cv.getContext("2d");
+  const W = cv.width, H = cv.height, N = 40;
+  const data = new Uint8Array(128);
+  const grad = g.createLinearGradient(0, 0, W, 0);
+  grad.addColorStop(0, "rgba(255,255,255,.9)"); grad.addColorStop(1, "rgba(255,255,255,.9)");
+  const step = () => {
+    const playing = fxs.audio && !fxs.audio.paused;
+    if (playing && fxs.nodes) fxs.nodes.an.getByteFrequencyData(data);
+    g.clearRect(0, 0, W, H);
+    g.fillStyle = grad;
+    let any = false;
+    for (let i = 0; i < N; i++) {
+      const target = playing ? data[Math.floor(1 + Math.pow(i / N, 1.5) * 95)] / 255 : 0;
+      const v = (fxs.bars[i] = (fxs.bars[i] || 0) + (target - (fxs.bars[i] || 0)) * (playing ? 0.35 : 0.12));
+      if (v > 0.005) any = true;
+      const bw = W / N, h = Math.max(2, v * H * 0.9);
+      const x = i * bw + bw * 0.25;
+      g.beginPath();
+      g.roundRect(x, H - h, bw * 0.5, h, [bw * 0.25, bw * 0.25, 0, 0]);
+      g.globalAlpha = 0.35 + v * 0.65;
+      g.fill();
+    }
+    g.globalAlpha = 1;
+    if (playing || any) fxs.raf = requestAnimationFrame(step);
+  };
+  step();
+}
+
+function applyFx() {
+  state.fx = fxIsOriginal(fxs.cur) ? null : { ...fxs.cur, preset: fxPresetOf(fxs.cur) };
+  renderEditSummary();
+  saveDraft();
+}
+
+function setupFx() {
+  $("#fxClose").onclick = closeFx;
+  $("#fxEditor").onclick = (e) => { if (e.target.id === "fxEditor") closeFx(); };
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("#fxEditor").hidden) closeFx(); });
+  $("#fxPlay").onclick = fxPlay;
+  $$("#fxPresets button").forEach((b) => (b.onclick = () => { fxs.cur = { ...FX_PRESETS[b.dataset.preset] }; fxSync("#fxSpeedVal"); }));
+  $$(".fx-pitch .seg").forEach((b) => (b.onclick = () => { fxs.cur.pitch = b.dataset.pitch; fxSync(); }));
+  $("#fxSpeed").oninput = (e) => { fxs.cur.speed = Math.round(Number(e.target.value) * 100) / 100; fxSync("#fxSpeedVal"); };
+  $("#fxReverb").oninput = (e) => { fxs.cur.reverb = Number(e.target.value); fxSync("#fxReverbVal"); };
+  $("#fxBass").oninput = (e) => { fxs.cur.bass = Number(e.target.value); fxSync("#fxBassVal"); };
+  $$(".fx-step").forEach((b) => (b.onclick = () => {
+    fxs.cur.speed = Math.min(2, Math.max(0.5, Math.round((fxs.cur.speed + Number(b.dataset.step)) * 100) / 100));
+    fxSync("#fxSpeedVal");
+  }));
+  $("#fxReset").onclick = () => { fxs.cur = { ...FX_PRESETS.original }; fxSync(); };
+  $("#fxApply").onclick = closeFx;
+}
+
 // ------------------------------------------------------------------ jobs --
 
 const STAGE_LABEL = {
   starting: "Starting…", downloading: "Downloading", converting: "Converting…",
-  tagging: "Adding tags & cover…", sending: "Sending to VLC", cancelling: "Stopping…", retrying: "Retrying…", editing: "Editing video…",
+  tagging: "Adding tags & cover…", sending: "Sending to VLC", cancelling: "Stopping…", retrying: "Retrying…", editing: "Editing", merging: "Merging video & audio…", cutting: "Downloading the clip…", resuming: "Connection lost, resuming…", vlc_waiting: "Waiting for VLC… keep its Wi-Fi screen open", offline: "No internet, waiting to continue…",
 };
 
 function cancelLink(id) {
@@ -1823,6 +2176,7 @@ async function init() {
   };
   $("#folderBtn").onclick = pickFolder;
   $("#checkUpdBtn").onclick = checkUpdatesNow;
+  watchConnection();
   setupClipEditor();
   $("#whatsNewBtn").onclick = () => openWhatsNew();
   $("#wnOk").onclick = closeWhatsNew;
