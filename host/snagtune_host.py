@@ -378,12 +378,26 @@ def cmd_ping(_msg):
     }
 
 
+_FRAME_SRC = {}  # url -> (time, stream url, headers): a small video stream to grab editor frames from
+_AUDIO_SRC = {}  # url -> (time, stream url, headers)
+
+
 def cmd_info(msg):
     opts = ydl_base_opts() | {"format": "bestaudio/best"}
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(msg["url"], download=False)
     if info.get("_type") == "playlist":
         raise RuntimeError("That's a playlist/set. Open a single track to download it.")
+    # keep the audio stream link: the Effects preview starts without a second lookup
+    f = (info.get("requested_formats") or [info])[0]
+    if f.get("url"):
+        _AUDIO_SRC[msg["url"]] = (time.time(), f["url"], f.get("http_headers") or {}, f.get("acodec"))
+    # and a small video stream for the editor's frames (360p is plenty for a preview)
+    small = [v for v in info.get("formats") or [] if v.get("vcodec") not in (None, "none") and v.get("url")
+             and (v.get("protocol") or "https").startswith("http") and 0 < (v.get("height") or 0) <= 360]
+    if small:
+        v = max(small, key=lambda v: (v.get("height") or 0, v.get("ext") == "mp4"))
+        _FRAME_SRC[msg["url"]] = (time.time(), v["url"], v.get("http_headers") or {})
     return {
         "meta": guess_metadata(info),
         "raw_title": info.get("title"),
@@ -420,7 +434,6 @@ def video_info(info):
     }
 
 
-_FRAME_SRC = {}  # url -> (time, stream url, headers): a small video stream to grab editor frames from
 
 
 def cmd_frame(msg):
@@ -429,21 +442,55 @@ def cmd_frame(msg):
     url, t = msg["url"], max(0.0, float(msg.get("t") or 0))
     src = _FRAME_SRC.get(url)
     if not src or time.time() - src[0] > 1800:  # stream links expire: refresh every 30 min
-        opts = ydl_base_opts() | {"format": "bv*[height<=480]/bv*/b", "format_sort": ["res:480"]}
+        opts = ydl_base_opts() | {"format": "bv*[height<=360]/bv*/b", "format_sort": ["res:360", "proto:https"]}
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False)
         f = (info.get("requested_formats") or [info])[0]
         src = _FRAME_SRC[url] = (time.time(), f["url"], f.get("http_headers") or {})
     headers = "".join(f"{k}: {v}\r\n" for k, v in src[2].items())
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-headers", headers, "-ss", f"{t:.2f}", "-i", src[1],
-           "-frames:v", "1", "-vf", "scale=640:-2", "-q:v", "4", "-f", "image2", "-c:v", "mjpeg", "pipe:1"]
+           "-frames:v", "1", "-vf", f"scale={min(1280, max(96, int(msg.get('w') or 640)))}:-2", "-q:v", "4", "-f", "image2", "-c:v", "mjpeg", "pipe:1"]
     r = subprocess.run(cmd, capture_output=True, timeout=40, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     if r.returncode != 0 or not r.stdout:
         raise RuntimeError("Couldn't grab that frame." + (" " + r.stderr.decode(errors="replace")[-200:] if r.stderr else ""))
     return {"t": t, "data": "data:image/jpeg;base64," + base64.b64encode(r.stdout).decode("ascii")}
 
 
-_AUDIO_SRC = {}  # url -> (time, stream url, headers)
+
+
+def cmd_video_preview(msg):
+    """Stream links the editor tab plays directly: a small video (360p) and the
+    audio. Reuses what reading the track found; looks it up again if stale."""
+    url = msg["url"]
+    v, a = _FRAME_SRC.get(url), _AUDIO_SRC.get(url)
+    if not v or not a or time.time() - min(v[0], a[0]) > 1800:
+        cmd_info({"url": url})
+        v, a = _FRAME_SRC.get(url), _AUDIO_SRC.get(url)
+    if not v:
+        raise RuntimeError("This video has no small stream to preview.")
+    return {"video": v[1], "audio": a[1] if a else None}
+
+
+def cmd_waveform(msg):
+    """`n` loudness peaks (0-1) across the whole song, for the editor's audio track."""
+    url, n = msg["url"], max(50, min(4000, int(msg.get("n") or 800)))
+    if url not in _AUDIO_SRC or time.time() - _AUDIO_SRC[url][0] > 1800:
+        cmd_info({"url": url})
+    src = _AUDIO_SRC[url]
+    headers = "".join(f"{k}: {v}\r\n" for k, v in src[2].items())
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-headers", headers, "-i", src[1],
+           "-vn", "-ac", "1", "-ar", "400", "-f", "s16le", "pipe:1"]
+    r = subprocess.run(cmd, capture_output=True, timeout=180, stdin=subprocess.DEVNULL,
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    if r.returncode != 0 or len(r.stdout) < 100:
+        raise RuntimeError("Couldn't read the audio for the waveform.")
+    import array
+    a = array.array("h")
+    a.frombytes(r.stdout[: len(r.stdout) // 2 * 2])
+    step = max(1, len(a) // n)
+    peaks = [max(abs(x) for x in a[i:i + step]) for i in range(0, step * n, step) if a[i:i + step]]
+    top = max(peaks) or 1
+    return {"peaks": [round(p / top, 3) for p in peaks]}
 
 
 def cmd_audio_preview(msg):
@@ -455,15 +502,19 @@ def cmd_audio_preview(msg):
         with yt_dlp.YoutubeDL(ydl_base_opts() | {"format": "bestaudio/best"}) as ydl:
             info = ydl.extract_info(url, download=False)
         f = (info.get("requested_formats") or [info])[0]
-        src = _AUDIO_SRC[url] = (time.time(), f["url"], f.get("http_headers") or {})
+        src = _AUDIO_SRC[url] = (time.time(), f["url"], f.get("http_headers") or {}, f.get("acodec"))
     headers = "".join(f"{k}: {v}\r\n" for k, v in src[2].items())
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-headers", headers, "-ss", f"{t:.1f}",
-           "-i", src[1], "-t", "30", "-vn", "-ac", "2", "-ar", "44100", "-c:a", "libmp3lame", "-b:a", "128k", "-f", "mp3", "pipe:1"]
+           "-i", src[1], "-t", "20", "-vn"]
+    opus = (src[3] or "").startswith("opus")
+    # Opus (YouTube): copy it as-is into WebM, the browser plays that; nothing to encode
+    cmd += (["-c:a", "copy", "-f", "webm"] if opus else ["-ac", "2", "-c:a", "libmp3lame", "-b:a", "128k", "-f", "mp3"]) + ["pipe:1"]
     r = subprocess.run(cmd, capture_output=True, timeout=60, stdin=subprocess.DEVNULL,
                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     if r.returncode != 0 or len(r.stdout) < 1000:
         raise RuntimeError("Couldn't load a preview." + (" " + r.stderr.decode(errors="replace")[-200:] if r.stderr else ""))
-    return {"data": "data:audio/mpeg;base64," + base64.b64encode(r.stdout).decode("ascii")}
+    mime = "audio/webm" if opus else "audio/mpeg"
+    return {"data": f"data:{mime};base64," + base64.b64encode(r.stdout).decode("ascii")}
 
 
 # reverb = a dozen fading echoes; the popup's preview uses the very same taps
@@ -620,7 +671,7 @@ _AUDIO_ENC = {".mp3": ["-c:a", "libmp3lame", "-b:a", "320k"], ".m4a": ["-c:a", "
               ".flac": ["-c:a", "flac"], ".wav": ["-c:a", "pcm_s16le"]}
 
 
-def apply_edits(path, speed=1.0, crop=None, progress=None, duration=None, fx=None):
+def apply_edits(path, speed=1.0, crop=None, progress=None, duration=None, fx=None, volume=1.0):
     """Speed (0.5-2x, audio pitch kept) and crop ({x,y,w,h} as fractions of the
     frame) in one ffmpeg pass. Returns the new file (or the same one if nothing to do)."""
     speed = float(speed or 1)
@@ -630,7 +681,9 @@ def apply_edits(path, speed=1.0, crop=None, progress=None, duration=None, fx=Non
     fx = (fx or {}) if not is_video else {}
     reverb = min(1.0, max(0.0, float(fx.get("reverb") or 0)))
     bass = min(15.0, max(0.0, float(fx.get("bass") or 0)))
-    if abs(speed - 1) < 0.01 and not crop and reverb < 0.01 and bass < 0.1:
+    volume = min(3.0, max(0.0, float(volume if volume is not None else 1)))
+    vol_changed = abs(volume - 1) >= 0.01
+    if abs(speed - 1) < 0.01 and not crop and reverb < 0.01 and bass < 0.1 and not vol_changed:
         return path
     if progress:
         progress("editing", 0 if duration else None)
@@ -644,13 +697,16 @@ def apply_edits(path, speed=1.0, crop=None, progress=None, duration=None, fx=Non
             vf.append(f"crop=trunc(iw*{w}/2)*2:trunc(ih*{h}/2)*2:trunc(iw*{x}):trunc(ih*{y})")
         if abs(speed - 1) >= 0.01:
             vf.append(f"setpts=PTS/{speed}")
-        if ext == ".webm":  # VP9 in its fastest mode + Opus
+        if not vf:  # only the volume changes: keep the picture as it is
+            cmd += ["-c:v", "copy"]
+        elif ext == ".webm":  # VP9 in its fastest mode + Opus
             cmd += ["-vf", ",".join(vf), "-c:v", "libvpx-vp9", "-deadline", "realtime", "-cpu-used", "8",
                     "-row-mt", "1", "-crf", "30", "-b:v", "0", "-pix_fmt", "yuv420p"]
         else:
             cmd += ["-vf", ",".join(vf), "-c:v", "libx264", "-preset", "superfast", "-crf", "19", "-pix_fmt", "yuv420p"]
-        if abs(speed - 1) >= 0.01:
-            cmd += ["-af", f"atempo={speed}"]
+        af = ([f"atempo={speed}"] if abs(speed - 1) >= 0.01 else []) + ([f"volume={volume:.2f}"] if vol_changed else [])
+        if af:
+            cmd += ["-af", ",".join(af)]
         if ext == ".webm":
             cmd += ["-c:a", "libopus", "-b:a", "160k"]
         else:
@@ -761,7 +817,8 @@ def run_download(job_id, msg):
                                        vformat=msg.get("vformat", "mp4"))
         clip = msg.get("clip") or {}
         length = (float(clip["end"]) - float(clip.get("start") or 0)) if clip.get("end") else info.get("duration")
-        audio_file = apply_edits(audio_file, msg.get("speed", 1), msg.get("crop"), progress, length, msg.get("fx"))
+        audio_file = apply_edits(audio_file, msg.get("speed", 1), msg.get("crop"), progress, length, msg.get("fx"),
+                                 msg.get("volume", 1))
 
         progress("tagging", 100)
         cover = None
@@ -1379,7 +1436,7 @@ COMMANDS = {"ping": cmd_ping, "info": cmd_info, "download": cmd_download,
             "playlist_info": cmd_playlist_info, "download_playlist": cmd_download_playlist, "cancel": cmd_cancel,
             "wallpaper": cmd_wallpaper, "sc_tracks": cmd_sc_tracks,
             "check_update": cmd_check_update, "installed_version": cmd_installed_version, "install_update": cmd_install_update,
-            "frame": cmd_frame, "audio_preview": cmd_audio_preview}
+            "frame": cmd_frame, "audio_preview": cmd_audio_preview, "video_preview": cmd_video_preview, "waveform": cmd_waveform}
 
 
 def handle(msg):
@@ -1401,7 +1458,7 @@ def main():
         if msg is None:
             break
         # slow commands (network) must never block the reader loop
-        if msg.get("cmd") in ("info", "update", "vlc_ping", "vlc_send", "pick_folder", "playlist_info", "wallpaper", "sc_tracks", "check_update", "install_update", "frame", "audio_preview"):
+        if msg.get("cmd") in ("info", "update", "vlc_ping", "vlc_send", "pick_folder", "playlist_info", "wallpaper", "sc_tracks", "check_update", "install_update", "frame", "audio_preview", "video_preview", "waveform"):
             threading.Thread(target=handle, args=(msg,), daemon=True).start()
         else:
             handle(msg)

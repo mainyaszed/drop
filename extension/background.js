@@ -305,10 +305,14 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         return startUpdate(msg.url, msg.version, false);
       case "scTracks":
         return call("sc_tracks", { ids: msg.ids, urls: msg.urls });
+      case "waveform":
+        return call("waveform", { url: msg.url, n: msg.n });
+      case "videoPreview":
+        return call("video_preview", { url: msg.url });
       case "audioPreview":
         return call("audio_preview", { url: msg.url, t: msg.t });
       case "frame":
-        return call("frame", { url: msg.url, t: msg.t });
+        return call("frame", { url: msg.url, t: msg.t, w: msg.w });
       case "wallpaper":
         return call("wallpaper", { sig: msg.sig });
       case "playlistInfo":

@@ -1,4 +1,27 @@
 {
+  "1.3.0": {
+    "items": [
+      {
+        "title": "A real video editor",
+        "text": "✂ Edit opens a full editor in its own tab: play and scrub the video, mark In and Out, loop the selection, change speed, crop (1:1, 9:16, 16:9, 4:5, 4:3) and set the volume. Your edits save as you go; Download picks them up.",
+        "image": "whatsnew/1.3.0-editor.jpg"
+      },
+      {
+        "title": "Slowed + Reverb, Sped up, Nightcore",
+        "text": "🎚 Effects for songs: speed from 0.5× to 2× (pitch follows or stays), reverb and bass boost, with presets and a live preview that sounds like the download.",
+        "image": "whatsnew/1.3.0-effects.jpg"
+      },
+      {
+        "title": "More for videos",
+        "text": "Pick MP4, MKV or WebM. The thumbnail is built into the file like an album cover, the channel is saved too, and you see the resolution, fps and views at a glance.",
+        "image": "whatsnew/1.3.0-video.jpg"
+      },
+      {
+        "title": "Downloads that don't give up",
+        "text": "If the helper restarts, the internet drops or your phone leaves Wi-Fi while sending to VLC, Drop waits and continues where it left off. A banner tells you when you're offline."
+      }
+    ]
+  },
   "1.2.3": {
     "items": [
       {

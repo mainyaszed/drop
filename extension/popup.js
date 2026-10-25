@@ -1061,6 +1061,7 @@ function mediaRequest() {
     if (c.start > 0.05 || (dur && c.end < dur - 0.05)) req.clip = { start: c.start, end: c.end };
     if (c.speed !== 1) req.speed = c.speed;
     if (c.crop && state.media === "video") req.crop = c.crop;
+    if (c.volume != null && c.volume !== 1) req.volume = c.volume;
   }
   return req;
 }
@@ -1141,6 +1142,7 @@ function renderEditSummary() {
     if (c.start > 0.05 || (dur && c.end < dur - 0.05)) parts.push(`✂ ${fmtT(c.start)}–${fmtT(c.end)}`);
     if (c.speed !== 1) parts.push(`${c.speed}×`);
     if (c.crop && state.media === "video") parts.push(c.cropName);
+    if (c.volume != null && c.volume !== 1) parts.push(`vol ${Math.round(c.volume * 100)}%`);
   }
   $("#editSummaryText").textContent = parts.join(" · ");
   show("#editSummary", parts.length > 0);
@@ -1164,8 +1166,8 @@ async function openClipEditor() {
   if (video) {
     // nothing heavy on open: the thumbnail, and real frames only once a handle moves
     $("#clipFrame").src = state.info.thumbnail || "";
-    $("#clipWhich").textContent = "Move a handle to see that frame";
     show("#clipMsg", false);
+    loadFrame(); // the real Start frame replaces the thumbnail as soon as it arrives
   }
   else {
     $("#clipFrame").src = coverSrc() || state.info.thumbnail || ""; show("#cropBox", false); $("#clipWhich").textContent = "Audio"; }
@@ -1287,8 +1289,16 @@ function applyClip() {
   renderEditSummary();
 }
 
+// the video editor lives in its own tab: a real player, room to work, and it
+// stays open while you click around; edits land in this URL's draft
+async function openEditorTab() {
+  if (!state.info) return;
+  await saveDraft();
+  chrome.tabs.create({ url: `editor.html?url=${encodeURIComponent(state.url)}` });
+}
+
 function setupClipEditor() {
-  $("#clipBtn").onclick = () => (state.media === "audio" ? openFx() : openClipEditor());
+  $("#clipBtn").onclick = () => (state.media === "audio" ? openFx() : openEditorTab());
   setupFx();
   $("#clipClose").onclick = closeClipEditor;
   $("#clipEditor").onclick = (e) => { if (e.target.id === "clipEditor") closeClipEditor(); };
@@ -1408,6 +1418,7 @@ function openFx() {
   $("#fxArtist").textContent = $("#fArtist").value || state.info.uploader || "";
   show("#fxEditor");
   show("#main", false);
+  if (!fxs.audio || fxs.url !== state.url) fxPrefetch();
   fxSync();
 }
 
@@ -1466,6 +1477,16 @@ function fxApplyLive() {
   fxs.nodes.out.gain.setTargetAtTime(reverbOut(f.reverb / 100), t, 0.05);
 }
 
+// start loading the preview as soon as Effects opens: usually ready before you press play
+function fxPrefetch() {
+  if (fxs.pre && fxs.preUrl === state.url) return fxs.pre;
+  const dur = state.info.duration || 0;
+  fxs.preUrl = state.url;
+  fxs.pre = bg("audioPreview", { url: state.url, t: dur > 60 ? Math.round(dur * 0.3) : 0 });
+  fxs.pre.catch(() => {}); // a failed prefetch shows up only if you press play
+  return fxs.pre;
+}
+
 async function fxPlay() {
   const player = $("#fxPlayer");
   if (fxs.audio && !fxs.audio.paused) { fxs.audio.pause(); return; }
@@ -1476,7 +1497,7 @@ async function fxPlay() {
     $("#fxStatus").textContent = "Loading…";
     try {
       const dur = state.info.duration || 0;
-      const r = await bg("audioPreview", { url: state.url, t: dur > 60 ? Math.round(dur * 0.3) : 0 });
+      const r = await fxPrefetch();
       fxs.audio = new Audio(r.data);
       fxs.url = state.url;
       fxs.audio.loop = true;
@@ -1507,6 +1528,7 @@ async function fxPlay() {
       fxs.audio.onplay = () => { player.classList.add("playing"); $("#fxStatus").textContent = "Preview"; fxDraw(); };
       fxs.audio.onpause = () => { player.classList.remove("playing"); $("#fxStatus").textContent = "Paused"; };
     } catch (e) {
+      fxs.pre = null; // let the next press try again
       $("#fxStatus").textContent = /Unknown message/.test(e.message) ? "Reload Drop once to use the preview."
         : isOffline(e.message) ? "No internet connection" : "Preview unavailable";
       if (isOffline(e.message)) showOffline(true);
