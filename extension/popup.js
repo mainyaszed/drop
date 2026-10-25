@@ -1623,8 +1623,16 @@ function playlistRow(id, j, left, right, li) {
       err.className = "err";
       err.textContent = s.rate_limited
         ? `${s.skipped} not downloaded: YouTube is limiting your connection. Wait a few minutes, then Retry failed.`
-        : `${s.skipped} skipped: ${(j.skipped || [])[0] || ""}`;
+        : `${s.skipped} couldn't be downloaded: ${(j.failed || [])[0]?.error || (j.skipped || [])[0] || ""}`;
       err.title = (j.skipped || []).join("\n");
+      li.append(err);
+    }
+    // missed the phone is a different problem from a failed download: own line
+    if (s.not_sent) {
+      const err = document.createElement("div");
+      err.className = "err";
+      err.textContent = `${s.not_sent} couldn't reach your phone, so they're saved on your PC. `
+        + "Keep VLC's Wi-Fi sharing screen open with the phone unlocked.";
       li.append(err);
     }
     retryLink(id, j, right);

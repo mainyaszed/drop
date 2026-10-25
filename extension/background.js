@@ -42,6 +42,20 @@ function call(cmd, payload = {}) {
   });
 }
 
+// Age-restricted YouTube videos only play for a signed-in account. Hand the
+// helper this browser's youtube.com cookies (only when signed in); it uses them
+// just for the videos YouTube refuses without them.
+async function youtubeCookies() {
+  try {
+    const all = await chrome.cookies.getAll({ domain: "youtube.com" });
+    if (!all.some((c) => c.name === "SAPISID" || c.name === "__Secure-3PAPISID")) return null;
+    return all.map(({ domain, hostOnly, path, secure, expirationDate, name, value }) =>
+      ({ domain, hostOnly, path, secure, expirationDate, name, value }));
+  } catch {
+    return null;
+  }
+}
+
 // ---------------------------------------------------------------- jobs --
 
 async function getJobs() {
@@ -84,7 +98,8 @@ async function resumeRunningJobs(error) {
       req = { ...req, entries: req.entries.slice(done) };
     }
     try {
-      connect().postMessage({ id, cmd: j.kind === "playlist" ? "download_playlist" : "download", ...req });
+      connect().postMessage({ id, cmd: j.kind === "playlist" ? "download_playlist" : "download", ...req,
+        yt_cookies: await youtubeCookies() });
     } catch (e) {
       updateJob(id, { status: "error", error: hostError(e.message) });
     }
@@ -111,7 +126,8 @@ async function resumeWhenOnline(msg) {
       updateJob(msg.id, { stage: "resuming" });
       let req = j.request;
       if (j.kind === "playlist") req = { ...req, entries: req.entries.slice(Math.max(0, (j.item || 1) - 1)) };
-      connect().postMessage({ id: msg.id, cmd: j.kind === "playlist" ? "download_playlist" : "download", ...req });
+      connect().postMessage({ id: msg.id, cmd: j.kind === "playlist" ? "download_playlist" : "download", ...req,
+        yt_cookies: await youtubeCookies() });
       return;
     }
   }
@@ -172,7 +188,7 @@ async function startDownload(req) {
     request: req, // kept so the job can restart if the helper dies
   });
   setBadge();
-  connect().postMessage({ id, cmd: "download", ...req });
+  connect().postMessage({ id, cmd: "download", ...req, yt_cookies: await youtubeCookies() });
   return id;
 }
 
@@ -193,7 +209,7 @@ async function startPlaylist(req, info) {
     request: req, // kept so "Retry failed" can re-run just the failed tracks
   });
   setBadge();
-  connect().postMessage({ id, cmd: "download_playlist", ...req });
+  connect().postMessage({ id, cmd: "download_playlist", ...req, yt_cookies: await youtubeCookies() });
   return id;
 }
 
@@ -289,7 +305,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       case "ping":
         return call("ping");
       case "info":
-        return call("info", { url: msg.url });
+        return call("info", { url: msg.url, yt_cookies: await youtubeCookies() });
       case "download":
         return { jobId: await startDownload(msg.request) };
       case "reveal":

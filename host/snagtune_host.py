@@ -368,6 +368,42 @@ def ydl_base_opts():
     }
 
 
+def write_cookie_file(cookies, folder):
+    """Netscape cookies.txt from the browser's youtube.com cookies (see background.js)."""
+    lines = ["# Netscape HTTP Cookie File"]
+    for c in cookies:
+        domain = c["domain"] if c.get("hostOnly") else "." + c["domain"].lstrip(".")
+        lines.append("\t".join([domain, "FALSE" if c.get("hostOnly") else "TRUE", c.get("path") or "/",
+                                "TRUE" if c.get("secure") else "FALSE", str(int(c.get("expirationDate") or 0)),
+                                c["name"], c["value"]]))
+    path = Path(folder) / "cookies.txt"
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return str(path)
+
+
+def extract(opts, url, download, cookies=None, folder=None):
+    """extract_info, signed out first. Only an age-restricted video is retried
+    with the browser's YouTube sign-in, so normal downloads never use the account."""
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            return ydl.extract_info(url, download=download)
+    except Exception as e:
+        if "confirm your age" not in str(e):
+            raise
+    if not cookies:
+        raise RuntimeError("Age-restricted on YouTube. Sign in to YouTube in this browser with an adult "
+                           "account, then try again.")
+    log.info("Age-restricted: retrying with the browser's YouTube sign-in")
+    try:
+        with yt_dlp.YoutubeDL(opts | {"cookiefile": write_cookie_file(cookies, folder)}) as ydl:
+            return ydl.extract_info(url, download=download)
+    except Exception as e:
+        if "confirm your age" in str(e):
+            raise RuntimeError("Age-restricted, and your YouTube account isn't allowed to play it "
+                               "(YouTube may want the account's age verified).") from None
+        raise
+
+
 def cmd_ping(_msg):
     return {
         "version": VERSION,
@@ -380,8 +416,8 @@ def cmd_ping(_msg):
 
 def cmd_info(msg):
     opts = ydl_base_opts() | {"format": "bestaudio/best"}
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(msg["url"], download=False)
+    with tempfile.TemporaryDirectory(prefix="snagtune_") as folder:
+        info = extract(opts, msg["url"], False, msg.get("yt_cookies"), folder)
     if info.get("_type") == "playlist":
         raise RuntimeError("That's a playlist/set. Open a single track to download it.")
     return {
@@ -545,7 +581,8 @@ class Cancelled(Exception):
     pass
 
 
-def fetch_track(url, fmt, tmp, progress, job_id, mode="audio", quality=None, clip=None, exact=True, vformat="mp4"):
+def fetch_track(url, fmt, tmp, progress, job_id, mode="audio", quality=None, clip=None, exact=True, vformat="mp4",
+                cookies=None):
     """Download + convert one track into tmp. Returns (file, info).
     mode "video" saves an MP4 (best quality up to `quality` px tall). clip =
     {"start": s, "end": s} downloads only that section (exact = cut on the exact
@@ -606,8 +643,7 @@ def fetch_track(url, fmt, tmp, progress, job_id, mode="audio", quality=None, cli
         # audio-only streams can only be split coarsely (a "fast" 10 s clip came out ~20 s),
         # and cutting audio exactly is cheap: only video gets the fast option
         opts["force_keyframes_at_cuts"] = bool(exact) or mode != "video"
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(url, download=True)
+    info = extract(opts, url, True, cookies, tmp)
     exts = (".mp4", ".mkv", ".webm", ".mov") if mode == "video" else (".mp3", ".m4a", ".opus", ".flac", ".ogg", ".aac", ".wav")
     files = [f for f in tmp.iterdir() if f.is_file() and f.suffix.lower() in exts]
     if not files:
@@ -758,7 +794,7 @@ def run_download(job_id, msg):
         mode = msg.get("mode", "audio")
         audio_file, info = fetch_track(msg["url"], fmt, tmp, progress, job_id, mode=mode,
                                        quality=msg.get("quality"), clip=msg.get("clip"), exact=msg.get("exact", True),
-                                       vformat=msg.get("vformat", "mp4"))
+                                       vformat=msg.get("vformat", "mp4"), cookies=msg.get("yt_cookies"))
         clip = msg.get("clip") or {}
         length = (float(clip["end"]) - float(clip.get("start") or 0)) if clip.get("end") else info.get("duration")
         audio_file = apply_edits(audio_file, msg.get("speed", 1), msg.get("crop"), progress, length, msg.get("fx"))
@@ -921,6 +957,8 @@ def run_playlist(job_id, msg):
     failed = []          # entries to offer for "Retry failed"
     rate_limited = 0     # rate-limit hits in a row
     stopped_early = False
+    unsent = []          # (path, title) saved to the PC because VLC wasn't reachable
+    next_k = 0           # first track not finished yet, for "Retry failed" after Cancel
 
     for k, item in enumerate(items):
         if job_id in CANCELLED:
@@ -945,7 +983,7 @@ def run_playlist(job_id, msg):
                 try:
                     audio_file, info = fetch_track(item["url"], fmt, tmp, progress, job_id,
                                                    mode=msg.get("mode", "audio"), quality=msg.get("quality"),
-                                                   vformat=msg.get("vformat", "mp4"))
+                                                   vformat=msg.get("vformat", "mp4"), cookies=msg.get("yt_cookies"))
                     rate_limited = 0
                     break
                 except Cancelled:
@@ -992,7 +1030,7 @@ def run_playlist(job_id, msg):
             saved += 1
             sent += res.get("vlc") == "sent"
             if res.get("vlc_error"):
-                skipped.append(f"{item.get('title')}: not sent to VLC, saved to PC")
+                unsent.append((Path(res["path"]), item.get("title")))
         except Cancelled:
             cancelled = True
             break
@@ -1010,6 +1048,7 @@ def run_playlist(job_id, msg):
                 break
         finally:
             remove_tmp(tmp)
+        next_k = k + 1
         # a short breather between tracks: rapid-fire requests are what trigger YouTube's limits
         if k + 1 < n:
             try:
@@ -1018,10 +1057,21 @@ def run_playlist(job_id, msg):
                 cancelled = True
                 break
 
+    if cancelled:
+        for rest in items[next_k:]:
+            failed.append({"index": rest.get("index"), "url": rest.get("url"), "title": rest.get("title"),
+                           "error": "Not tried: cancelled"})
+
+    # The phone usually drops off mid-run (screen locked). Give the tracks that
+    # missed it a second chance now, and stop as soon as VLC is still away.
+    if unsent and msg.get("vlc_url") and not cancelled:
+        unsent, sent = retry_vlc(job_id, unsent, msg["vlc_url"], sent)
+    skipped += [f"{title}: not sent to VLC, saved to PC" for _, title in unsent]
+
     CANCELLED.discard(job_id)
     local = saved - sent
     summary = {"saved": saved, "sent": sent, "skipped": len(failed), "total": n, "cancelled": cancelled,
-               "rate_limited": stopped_early}
+               "rate_limited": stopped_early, "not_sent": len(unsent)}
     if saved == 0:
         send({"id": job_id, "type": "error", "cancelled": cancelled,
               "error": "Cancelled." if cancelled else (skipped[0] if skipped else "Nothing was downloaded."),
@@ -1030,6 +1080,36 @@ def run_playlist(job_id, msg):
     send({"id": job_id, "type": "done", "ext": fmt, "playlist": summary,
           "path": str(out_dir) if local else None, "vlc": "sent" if sent and not local else None,
           "skipped_list": skipped[:60], "failed": failed})
+
+
+def retry_vlc(job_id, unsent, vlc_url, sent):
+    """Re-send tracks that fell back to the PC. A track that gets through is
+    removed from the PC (VLC mode keeps nothing locally). Returns (still_unsent, sent)."""
+    left = list(unsent)
+    for attempt in range(2):
+        if attempt:
+            time.sleep(5)  # one short wait in case the phone is just waking up
+        while left and job_id not in CANCELLED:
+            path, title = left[0]
+            done = len(unsent) - len(left)
+            send({"id": job_id, "type": "progress", "stage": "sending", "percent": round(done / len(unsent) * 100, 1),
+                  "item": done + 1, "total": len(unsent), "current": title})
+            try:
+                vlc_upload(path, vlc_url)
+            except Exception as e:
+                log.info("VLC retry failed: %s", e)
+                break
+            path.unlink(missing_ok=True)
+            left.pop(0)
+            sent += 1
+        if not left:
+            break
+    if len(left) < len(unsent):
+        try:
+            unsent[0][0].parent.rmdir()  # only succeeds if the folder is now empty
+        except OSError:
+            pass
+    return left, sent
 
 
 def cmd_download_playlist(msg):
@@ -1045,7 +1125,9 @@ def cmd_cancel(msg):
 def friendly_error(e):
     text = re.sub(r"\x1b\[[0-9;]*m", "", str(e))
     text = text.replace("ERROR: ", "")
-    if _RATE_LIMIT.search(text):
+    if "confirm your age" in text:  # "Sign in to confirm your age" isn't a rate limit
+        text = "Age-restricted on YouTube. Sign in to YouTube in this browser with an adult account, then try again."
+    elif _RATE_LIMIT.search(text):
         text = ("YouTube is limiting downloads from your connection (too many in a row). "
                 "Wait a few minutes, then use Retry failed. Updating yt-dlp in Settings can help too.")
     elif isinstance(e, FileNotFoundError) and len(str(getattr(e, "filename", "") or "")) > 200:
